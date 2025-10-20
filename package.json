@@ -1,6 +1,26 @@
 {
   "dependencies": {
     "axios": "^1.12.2",
+    "node-appwrite": "^20.2.1",
     "nodemailer": "^7.0.9"
-  }
+  },
+  "name": "binance_ob_finder",
+  "version": "1.0.0",
+  "description": "",
+  "main": "binance_ob_finder.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jiaxu09/ob_finder.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/jiaxu09/ob_finder/issues"
+  },
+  "homepage": "https://github.com/jiaxu09/ob_finder#readme"
 }
