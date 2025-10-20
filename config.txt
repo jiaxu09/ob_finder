@@ -1,0 +1,11 @@
+TELEGRAM_BOT_TOKEN: '7607543807:AAFcNXDZE_ctPhTQVc60vnX69o0zPjzsLb0', // 替换为你的 Bot Token
+    TELEGRAM_CHAT_ID: '7510264240',   // 替换为你的 Chat ID
+
+
+    EMAIL_CONFIG_GMAIL: {
+        service: 'gmail',
+        auth: {
+            user: 'jiaxu99.w@gmail.com', // 你的 Gmail 邮箱
+            pass: 'hqmv qwbm qpik juiq'      // 你的 16 位 Google 应用密码
+        }
+    },
