@@ -92,17 +92,17 @@ module.exports = async (context) => {
         SWING_LENGTH: parseInt( '10'),
         KLINE_LIMIT: 1000,
         
-        ENABLE_TELEGRAM: context.env.ENABLE_TELEGRAM === 'true',
-        TELEGRAM_BOT_TOKEN: context.env.TELEGRAM_BOT_TOKEN,
-        TELEGRAM_CHAT_ID: context.env.TELEGRAM_CHAT_ID,
+        ENABLE_TELEGRAM: 'true',
+        TELEGRAM_BOT_TOKEN: '7607543807:AAFcNXDZE_ctPhTQVc60vnX69o0zPjzsLb0',
+        TELEGRAM_CHAT_ID: '7510264240',
 
-        ENABLE_EMAIL: context.env.ENABLE_EMAIL === 'true',
-        EMAIL_RECIPIENT: context.env.EMAIL_RECIPIENT,
+        ENABLE_EMAIL:  'true',
+        EMAIL_RECIPIENT: 'jiaxu99.w@gmail.com',
         EMAIL_CONFIG: {
             service: 'gmail',
             auth: {
-                user: context.env.GMAIL_USER,
-                pass: context.env.GMAIL_APP_PASSWORD
+                user: 'jiaxu99.w@gmail.com',
+                pass: 'hqmv qwbm qpik juiq'
             }
         }
     };
