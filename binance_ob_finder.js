@@ -109,13 +109,13 @@ module.exports = async (context) => {
 
     // --- 2. 初始化 Appwrite Client ---
     const client = new Client()
-        .setEndpoint(context.env.APPWRITE_FUNCTION_ENDPOINT)
-        .setProject(context.env.APPWRITE_FUNCTION_PROJECT_ID)
-        .setKey(context.env.APPWRITE_API_KEY);
+        .setEndpoint('https://syd.cloud.appwrite.io/v1')
+        .setProject('68f59e58002322d3d474')
+        .setKey('standard_2555e90b24b6442cafa174ecccc387d2668557a61d73186f705f7e65681f9ed2cbbf5a672f55669cb9a549a5a8a282b2f1dd32e3f3a1a818dd06c2ce4e23f72da594fddd5dfcd736f0bb04d1151962a6fb9568a25c700e8d4746eddc96ec2538556dd23e696117ad6ebdbdb05856a5250fb125e03b3484fd6b73e24d245c59e8');
 
     const databases = new Databases(client);
-    const DB_ID = context.env.APPWRITE_DATABASE_ID;
-    const COLLECTION_ID = context.env.APPWRITE_COLLECTION_ID;
+    const DB_ID = '68f5a3fa001774a5ab3d';
+    const COLLECTION_ID = 'seen_zones';
 
     // --- 3. 状态管理 (使用 Appwrite Database) ---
     async function loadPreviousZones() {
