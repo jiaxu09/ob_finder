@@ -140,7 +140,7 @@ function findOrderBlocksStatefulSimulation(klines, length) {
 // --- Appwrite Function Entrypoint ---
 // 这是函数执行的入口点
 // ============================================================================
-module.exports = async ({ req, res, log, error }) => {
+const handleExecution = async ({ req, res, log, error }) => {
     log('Function execution started...');
 
     // --- 1. 初始化配置和 Appwrite Client ---
@@ -251,3 +251,5 @@ module.exports = async ({ req, res, log, error }) => {
     log('Function execution finished successfully.');
     return res.json({ success: true, new_zones_found: newNotifications.length });
 };
+
+module.exports = handleExecution;
