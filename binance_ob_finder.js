@@ -87,9 +87,9 @@ module.exports = async (context) => {
 
     // --- 1. 从环境变量加载配置 (安全方式) ---
     const CONFIG = {
-        SYMBOL: context.env.SYMBOL || 'BTCUSDT',
-        TIMEZONES: (context.env.TIMEZONES || '1h,4h,1d').split(','),
-        SWING_LENGTH: parseInt(context.env.SWING_LENGTH || '10'),
+        SYMBOL:  'BTCUSDT',
+        TIMEZONES: ('1h,4h,1d').split(','),
+        SWING_LENGTH: parseInt( '10'),
         KLINE_LIMIT: 1000,
         
         ENABLE_TELEGRAM: context.env.ENABLE_TELEGRAM === 'true',
