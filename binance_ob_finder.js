@@ -41,41 +41,114 @@ async function getKlines(symbol, interval, limit, context) {
     }
 }
 
-function findOrderBlocksStatefulSimulation(klines, length) {
-    const bullishOBs = [], bearishOBs = [];
-    let lastSwingHigh = null, lastSwingLow = null;
-    for (let i = length; i < klines.length; i++) {
-        const refIndex = i - length;
+function findOrderBlocksStatefulSimulation(klines, swingLength, volumeLookback = 20, volumeThresholdPercentile = 70) {
+    const bullishOBs = [];
+    const bearishOBs = [];
+    let lastSwingHigh = null;
+    let lastSwingLow = null;
+
+    // 预计算成交量分位数（用于动态阈值）
+    function getVolumeThreshold(startIndex, endIndex) {
+        const vols = klines.slice(startIndex, endIndex).map(k => k.volume).filter(v => v > 0);
+        if (vols.length === 0) return 0;
+        vols.sort((a, b) => a - b);
+        const idx = Math.floor((volumeThresholdPercentile / 100) * (vols.length - 1));
+        return vols[idx];
+    }
+
+    for (let i = swingLength; i < klines.length; i++) {
+        const refIndex = i - swingLength;
         const windowSlice = klines.slice(refIndex + 1, i + 1);
         if (windowSlice.length === 0) continue;
+
+        // === 识别 Swing High ===
         const maxHighInWindow = Math.max(...windowSlice.map(c => c.high));
         if (klines[refIndex].high > maxHighInWindow) {
             lastSwingHigh = { ...klines[refIndex], index: refIndex, crossed: false };
         }
+
+        // === 识别 Swing Low ===
         const minLowInWindow = Math.min(...windowSlice.map(c => c.low));
         if (klines[refIndex].low < minLowInWindow) {
             lastSwingLow = { ...klines[refIndex], index: refIndex, crossed: false };
         }
+
         const currentCandle = klines[i];
+
+        // === 多头 Order Block：价格上破 Swing High ===
         if (lastSwingHigh && !lastSwingHigh.crossed && currentCandle.close > lastSwingHigh.high) {
-            lastSwingHigh.crossed = true;
-            const searchRange = klines.slice(lastSwingHigh.index, i);
-            if (searchRange.length > 0) {
-                const obCandle = searchRange.reduce((prev, curr) => (prev.low < curr.low ? prev : curr));
-                bullishOBs.push({ startTime: obCandle.timestamp, top: obCandle.high, bottom: obCandle.low, isValid: true });
+            // ✅ 规则2：突破K线需放量
+            const volThresholdForBreakout = getVolumeThreshold(Math.max(0, i - volumeLookback), i);
+            if (currentCandle.volume >= volThresholdForBreakout) {
+                lastSwingHigh.crossed = true;
+                const searchRange = klines.slice(lastSwingHigh.index, i);
+                if (searchRange.length > 0) {
+                    // ✅ 规则1：在区间内找“最低低点 + 高成交量”的K线作为 OB
+                    let bestCandle = null;
+                    const volThresholdForOB = getVolumeThreshold(Math.max(0, lastSwingHigh.index - volumeLookback), i);
+                    for (const candle of searchRange) {
+                        if (candle.volume >= volThresholdForOB) {
+                            if (!bestCandle || candle.low < bestCandle.low) {
+                                bestCandle = candle;
+                            }
+                        }
+                    }
+                    // 如果找不到高量K线，退而求其次用最低点（但标记为低置信）
+                    if (!bestCandle) {
+                        bestCandle = searchRange.reduce((prev, curr) => (prev.low < curr.low ? prev : curr));
+                    }
+                    bullishOBs.push({
+                        startTime: bestCandle.timestamp,
+                        top: bestCandle.high,
+                        bottom: bestCandle.low,
+                        volume: bestCandle.volume,
+                        isValid: true,
+                        confidence: bestCandle.volume >= volThresholdForOB ? 'high' : 'low'
+                    });
+                }
             }
         }
+
+        // === 空头 Order Block：价格下破 Swing Low ===
         if (lastSwingLow && !lastSwingLow.crossed && currentCandle.close < lastSwingLow.low) {
-            lastSwingLow.crossed = true;
-            const searchRange = klines.slice(lastSwingLow.index, i);
-            if (searchRange.length > 0) {
-                const obCandle = searchRange.reduce((prev, curr) => (prev.high > curr.high ? prev : curr));
-                bearishOBs.push({ startTime: obCandle.timestamp, top: obCandle.high, bottom: obCandle.low, isValid: true });
+            const volThresholdForBreakout = getVolumeThreshold(Math.max(0, i - volumeLookback), i);
+            if (currentCandle.volume >= volThresholdForBreakout) {
+                lastSwingLow.crossed = true;
+                const searchRange = klines.slice(lastSwingLow.index, i);
+                if (searchRange.length > 0) {
+                    let bestCandle = null;
+                    const volThresholdForOB = getVolumeThreshold(Math.max(0, lastSwingLow.index - volumeLookback), i);
+                    for (const candle of searchRange) {
+                        if (candle.volume >= volThresholdForOB) {
+                            if (!bestCandle || candle.high > bestCandle.high) {
+                                bestCandle = candle;
+                            }
+                        }
+                    }
+                    if (!bestCandle) {
+                        bestCandle = searchRange.reduce((prev, curr) => (prev.high > curr.high ? prev : curr));
+                    }
+                    bearishOBs.push({
+                        startTime: bestCandle.timestamp,
+                        top: bestCandle.high,
+                        bottom: bestCandle.low,
+                        volume: bestCandle.volume,
+                        isValid: true,
+                        confidence: bestCandle.volume >= volThresholdForOB ? 'high' : 'low'
+                    });
+                }
             }
         }
-        for (const ob of bullishOBs) if (ob.isValid && currentCandle.low < ob.bottom) ob.isValid = false;
-        for (const ob of bearishOBs) if (ob.isValid && currentCandle.high > ob.top) ob.isValid = false;
+
+        // === 动态失效：价格穿过 OB 区域 ===
+        for (const ob of bullishOBs) {
+            if (ob.isValid && currentCandle.low < ob.bottom) ob.isValid = false;
+        }
+        for (const ob of bearishOBs) {
+            if (ob.isValid && currentCandle.high > ob.top) ob.isValid = false;
+        }
     }
+
     return { bullishOBs, bearishOBs };
 }
 
@@ -148,7 +221,7 @@ module.exports = async (context) => {
             continue;
         }
 
-        const { bullishOBs, bearishOBs } = findOrderBlocksStatefulSimulation(klines, CONFIG.SWING_LENGTH);
+        const { bullishOBs, bearishOBs } = findOrderBlocksStatefulSimulation(klines, CONFIG.SWING_LENGTH,20,70);
         const allZones = [
             ...bullishOBs.filter(ob => ob.isValid).map(z => ({ ...z, type: 'Support' })),
             ...bearishOBs.filter(ob => ob.isValid).map(z => ({ ...z, type: 'Resistance' }))
