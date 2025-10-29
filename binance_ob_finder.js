@@ -83,7 +83,6 @@ function findOrderBlocksStatefulSimulation(
   let lastSwingHigh = null;
   let lastSwingLow = null;
 
-  // 预计算成交量分位数（用于动态阈值）
   function getVolumeThreshold(startIndex, endIndex) {
     const vols = klines
       .slice(startIndex, endIndex)
@@ -102,13 +101,11 @@ function findOrderBlocksStatefulSimulation(
     const windowSlice = klines.slice(refIndex + 1, i + 1);
     if (windowSlice.length === 0) continue;
 
-    // === 识别 Swing High ===
     const maxHighInWindow = Math.max(...windowSlice.map((c) => c.high));
     if (klines[refIndex].high > maxHighInWindow) {
       lastSwingHigh = { ...klines[refIndex], index: refIndex, crossed: false };
     }
 
-    // === 识别 Swing Low ===
     const minLowInWindow = Math.min(...windowSlice.map((c) => c.low));
     if (klines[refIndex].low < minLowInWindow) {
       lastSwingLow = { ...klines[refIndex], index: refIndex, crossed: false };
@@ -116,13 +113,11 @@ function findOrderBlocksStatefulSimulation(
 
     const currentCandle = klines[i];
 
-    // === 多头 Order Block：价格上破 Swing High ===
     if (
       lastSwingHigh &&
       !lastSwingHigh.crossed &&
       currentCandle.close > lastSwingHigh.high
     ) {
-      // ✅ 规则2：突破K线需放量
       const volThresholdForBreakout = getVolumeThreshold(
         Math.max(0, i - volumeLookback),
         i
@@ -131,7 +126,6 @@ function findOrderBlocksStatefulSimulation(
         lastSwingHigh.crossed = true;
         const searchRange = klines.slice(lastSwingHigh.index, i);
         if (searchRange.length > 0) {
-          // ✅ 规则1：在区间内找“最低低点 + 高成交量”的K线作为 OB
           let bestCandle = null;
           const volThresholdForOB = getVolumeThreshold(
             Math.max(0, lastSwingHigh.index - volumeLookback),
@@ -144,7 +138,6 @@ function findOrderBlocksStatefulSimulation(
               }
             }
           }
-          // 如果找不到高量K线，退而求其次用最低点（但标记为低置信）
           if (!bestCandle) {
             bestCandle = searchRange.reduce((prev, curr) =>
               prev.low < curr.low ? prev : curr
@@ -162,7 +155,6 @@ function findOrderBlocksStatefulSimulation(
       }
     }
 
-    // === 空头 Order Block：价格下破 Swing Low ===
     if (
       lastSwingLow &&
       !lastSwingLow.crossed &&
@@ -205,7 +197,6 @@ function findOrderBlocksStatefulSimulation(
       }
     }
 
-    // === 动态失效：价格穿过 OB 区域 ===
     for (const ob of bullishOBs) {
       if (ob.isValid && currentCandle.low < ob.bottom) ob.isValid = false;
     }
@@ -225,7 +216,10 @@ module.exports = async (context) => {
 
   // --- 1. 从环境变量加载配置 (安全方式) ---
   const CONFIG = {
-    SYMBOL: "BTCUSDT",
+    //
+    // ✨ [MODIFIED] Changed SYMBOL to SYMBOLS and made it an array
+    //
+    SYMBOLS: ["BTCUSDT", "ETHUSDT"],
     TIMEZONES: "1h,4h,1d".split(","),
     SWING_LENGTH: parseInt("10"),
     KLINE_LIMIT: 1000,
@@ -282,75 +276,93 @@ module.exports = async (context) => {
   }
 
   // --- 4. 主逻辑 ---
-  context.log(`Starting analysis for ${CONFIG.SYMBOL}...`);
-  const previousZones = await loadPreviousZones();
-  const newNotifications = [];
 
-  for (const tf of CONFIG.TIMEZONES) {
-    const klines = await getKlines(
-      CONFIG.SYMBOL,
-      tf,
-      CONFIG.KLINE_LIMIT,
-      context
-    );
-    if (!klines || klines.length <= CONFIG.SWING_LENGTH) {
-      context.log(`Insufficient data for ${tf}, skipping.`);
-      continue;
-    }
+  //
+  // ✨ [NEW] Encapsulated analysis logic into a function to be called for each symbol.
+  //
+  async function analyzeSymbol(symbol, context) {
+    context.log(`--- Starting analysis for ${symbol} ---`);
+    const previousZones = await loadPreviousZones();
+    const newNotifications = [];
 
-    const { bullishOBs, bearishOBs } = findOrderBlocksStatefulSimulation(
-      klines,
-      CONFIG.SWING_LENGTH,
-      20,
-      70
-    );
-    const allZones = [
-      ...bullishOBs
-        .filter((ob) => ob.isValid)
-        .map((z) => ({ ...z, type: "Support" })),
-      ...bearishOBs
-        .filter((ob) => ob.isValid)
-        .map((z) => ({ ...z, type: "Resistance" })),
-    ];
-
-    for (const zone of allZones) {
-      if (typeof zone.bottom !== "number" || typeof zone.top !== "number")
+    for (const tf of CONFIG.TIMEZONES) {
+      const klines = await getKlines(
+        symbol,
+        tf,
+        CONFIG.KLINE_LIMIT,
+        context
+      );
+      if (!klines || klines.length <= CONFIG.SWING_LENGTH) {
+        context.log(`Insufficient data for ${symbol} on ${tf}, skipping.`);
         continue;
-      const zoneIdentifier = `${zone.startTime.getTime()}-${zone.type}`;
-      if (!previousZones.has(zoneIdentifier)) {
-        context.log(`New zone found: ${zoneIdentifier}`);
+      }
 
-        const nzTime = zone.startTime.toLocaleString("en-NZ", {
-          timeZone: "Pacific/Auckland",
-          year: "numeric",
-          month: "2-digit",
-          day: "2-digit",
-          hour: "2-digit",
-          minute: "2-digit",
-          second: "2-digit",
-          hour12: false,
-        });
+      const { bullishOBs, bearishOBs } = findOrderBlocksStatefulSimulation(
+        klines,
+        CONFIG.SWING_LENGTH,
+        20,
+        70
+      );
+      const allZones = [
+        ...bullishOBs
+          .filter((ob) => ob.isValid)
+          .map((z) => ({ ...z, type: "Support" })),
+        ...bearishOBs
+          .filter((ob) => ob.isValid)
+          .map((z) => ({ ...z, type: "Resistance" })),
+      ];
 
-        const message = `*🔔 新区域警报: ${CONFIG.SYMBOL} (${tf})*\n\n*类型:* ${
-          zone.type === "Support" ? "🟢 支撑区" : "🔴 阻力区"
-        }\n*价格范围:* ${zone.bottom.toFixed(4)} - ${zone.top.toFixed(
-          4
-        )}\n*形成时间 (NZST/NZDT):* ${nzTime}`;
-        newNotifications.push({
-          message,
-          subject: `新 ${tf} ${zone.type} 区域: ${CONFIG.SYMBOL}`,
-        });
-        await saveNewZone(zoneIdentifier);
+      for (const zone of allZones) {
+        if (typeof zone.bottom !== "number" || typeof zone.top !== "number")
+          continue;
+        // Include symbol in the identifier to distinguish between BTC and ETH zones
+        const zoneIdentifier = `${symbol}-${zone.startTime.getTime()}-${zone.type}`;
+        if (!previousZones.has(zoneIdentifier)) {
+          context.log(`New zone found for ${symbol}: ${zoneIdentifier}`);
+
+          const nzTime = zone.startTime.toLocaleString("en-NZ", {
+            timeZone: "Pacific/Auckland",
+            year: "numeric",
+            month: "2-digit",
+            day: "2-digit",
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+            hour12: false,
+          });
+
+          const message = `*🔔 新区域警报: ${symbol} (${tf})*\n\n*类型:* ${
+            zone.type === "Support" ? "🟢 支撑区" : "🔴 阻力区"
+          }\n*价格范围:* ${zone.bottom.toFixed(4)} - ${zone.top.toFixed(
+            4
+          )}\n*形成时间 (NZST/NZDT):* ${nzTime}`;
+          newNotifications.push({
+            message,
+            subject: `新 ${tf} ${zone.type} 区域: ${symbol}`,
+          });
+          await saveNewZone(zoneIdentifier);
+        }
       }
     }
+    return newNotifications;
   }
 
-  if (newNotifications.length > 0) {
+  const allNewNotifications = [];
+  //
+  // ✨ [MODIFIED] Loop through each symbol in the CONFIG and run the analysis.
+  //
+  for (const symbol of CONFIG.SYMBOLS) {
+      const notifications = await analyzeSymbol(symbol, context);
+      allNewNotifications.push(...notifications);
+  }
+
+
+  if (allNewNotifications.length > 0) {
     context.log(
-      `Found ${newNotifications.length} new zones. Sending notifications...`
+      `Found ${allNewNotifications.length} total new zones. Sending notifications...`
     );
     await Promise.all(
-      newNotifications.map((n) =>
+      allNewNotifications.map((n) =>
         Promise.all([
           sendTelegramNotification(CONFIG, n.message, context),
           sendEmailNotification(CONFIG, n.subject, n.message, context),
@@ -358,12 +370,12 @@ module.exports = async (context) => {
       )
     );
   } else {
-    context.log("No new zones found.");
+    context.log("No new zones found across all symbols.");
   }
 
   context.log("Function execution finished successfully.");
   return context.res.json({
     success: true,
-    new_zones_found: newNotifications.length,
+    new_zones_found: allNewNotifications.length,
   });
 };
