@@ -3,7 +3,7 @@ const axios = require("axios");
 const nodemailer = require("nodemailer");
 
 // ============================================================================
-// --- 辅助函数 (已适配 Appwrite context) ---
+// --- 辅助函数 ---
 // ============================================================================
 
 async function sendTelegramNotification(config, message, context) {
@@ -58,13 +58,14 @@ async function getKlines(symbol, interval, limit, context) {
     const response = await axios.get(url, {
       params: { symbol, interval, limit },
     });
-    return response.data.map((k) => ({
+    return response.data.map((k, index) => ({ // ✅ 添加 index
       timestamp: new Date(k[0]),
       open: parseFloat(k[1]),
       high: parseFloat(k[2]),
       low: parseFloat(k[3]),
       close: parseFloat(k[4]),
       volume: parseFloat(k[5]),
+      index, // ✅ 保留原始索引
     }));
   } catch (e) {
     context.error(`Failed to get klines for ${symbol} ${interval}:`, e.message);
@@ -72,14 +73,15 @@ async function getKlines(symbol, interval, limit, context) {
   }
 }
 
+// ✅ [修正] 改进的 OB 识别函数
 function findOrderBlocksStatefulSimulation(
   klines,
   swingLength,
   volumeLookback = 20,
   volumeThresholdPercentile = 70
 ) {
-  const bullishOBs = [];
-  const bearishOBs = [];
+  let bullishOBs = []; // ✅ 改用 let 以便重新赋值
+  let bearishOBs = [];
   let lastSwingHigh = null;
   let lastSwingLow = null;
 
@@ -113,6 +115,7 @@ function findOrderBlocksStatefulSimulation(
 
     const currentCandle = klines[i];
 
+    // ✅ 看涨 OB 识别
     if (
       lastSwingHigh &&
       !lastSwingHigh.crossed &&
@@ -131,6 +134,8 @@ function findOrderBlocksStatefulSimulation(
             Math.max(0, lastSwingHigh.index - volumeLookback),
             i
           );
+          
+          // ✅ 优先选择高成交量的蜡烛
           for (const candle of searchRange) {
             if (candle.volume >= volThresholdForOB) {
               if (!bestCandle || candle.low < bestCandle.low) {
@@ -138,13 +143,18 @@ function findOrderBlocksStatefulSimulation(
               }
             }
           }
+          
+          // ✅ 如果没有符合条件的，选择最低点
           if (!bestCandle) {
             bestCandle = searchRange.reduce((prev, curr) =>
               prev.low < curr.low ? prev : curr
             );
           }
+          
           bullishOBs.push({
-            startTime: bestCandle.timestamp,
+            startTime: bestCandle.timestamp, // OB 蜡烛时间
+            confirmationTime: currentCandle.timestamp, // ✅ 突破确认时间
+            confirmationIndex: i, // ✅ 突破确认索引
             top: bestCandle.high,
             bottom: bestCandle.low,
             volume: bestCandle.volume,
@@ -155,6 +165,7 @@ function findOrderBlocksStatefulSimulation(
       }
     }
 
+    // ✅ 看跌 OB 识别
     if (
       lastSwingLow &&
       !lastSwingLow.crossed &&
@@ -173,6 +184,7 @@ function findOrderBlocksStatefulSimulation(
             Math.max(0, lastSwingLow.index - volumeLookback),
             i
           );
+          
           for (const candle of searchRange) {
             if (candle.volume >= volThresholdForOB) {
               if (!bestCandle || candle.high > bestCandle.high) {
@@ -180,13 +192,17 @@ function findOrderBlocksStatefulSimulation(
               }
             }
           }
+          
           if (!bestCandle) {
             bestCandle = searchRange.reduce((prev, curr) =>
               prev.high > curr.high ? prev : curr
             );
           }
+          
           bearishOBs.push({
             startTime: bestCandle.timestamp,
+            confirmationTime: currentCandle.timestamp, // ✅
+            confirmationIndex: i, // ✅
             top: bestCandle.high,
             bottom: bestCandle.low,
             volume: bestCandle.volume,
@@ -197,12 +213,20 @@ function findOrderBlocksStatefulSimulation(
       }
     }
 
-    for (const ob of bullishOBs) {
-      if (ob.isValid && currentCandle.low < ob.bottom) ob.isValid = false;
-    }
-    for (const ob of bearishOBs) {
-      if (ob.isValid && currentCandle.high > ob.top) ob.isValid = false;
-    }
+    // ✅ [性能优化] 使用 filter 代替遍历修改
+    bullishOBs = bullishOBs.filter(ob => {
+      if (ob.isValid && currentCandle.low < ob.bottom) {
+        return false; // 移除失效的 OB
+      }
+      return true;
+    });
+    
+    bearishOBs = bearishOBs.filter(ob => {
+      if (ob.isValid && currentCandle.high > ob.top) {
+        return false;
+      }
+      return true;
+    });
   }
 
   return { bullishOBs, bearishOBs };
@@ -214,11 +238,7 @@ function findOrderBlocksStatefulSimulation(
 module.exports = async (context) => {
   context.log("Function execution started...");
 
-  // --- 1. 从环境变量加载配置 (安全方式) ---
   const CONFIG = {
-    //
-    // ✨ [MODIFIED] Changed SYMBOL to SYMBOLS and made it an array
-    //
     SYMBOLS: ["BTCUSDT", "ETHUSDT"],
     TIMEZONES: "1h,4h,1d".split(","),
     SWING_LENGTH: parseInt("10"),
@@ -239,7 +259,6 @@ module.exports = async (context) => {
     },
   };
 
-  // --- 2. 初始化 Appwrite Client ---
   const client = new Client()
     .setEndpoint("https://syd.cloud.appwrite.io/v1")
     .setProject("68f59e58002322d3d474")
@@ -251,7 +270,6 @@ module.exports = async (context) => {
   const DB_ID = "68f5a3fa001774a5ab3d";
   const COLLECTION_ID = "seen_zones";
 
-  // --- 3. 状态管理 (使用 Appwrite Database) ---
   async function loadPreviousZones() {
     try {
       const response = await databases.listDocuments(DB_ID, COLLECTION_ID, [
@@ -269,29 +287,22 @@ module.exports = async (context) => {
       await databases.createDocument(DB_ID, COLLECTION_ID, ID.unique(), {
         zoneIdentifier,
       });
+      return true;
     } catch (e) {
-      if (e.code !== 409)
+      if (e.code !== 409) {
         context.error(`Failed to save new zone ID "${zoneIdentifier}":`, e);
+      }
+      return false;
     }
   }
 
-  // --- 4. 主逻辑 ---
-
-  //
-  // ✨ [NEW] Encapsulated analysis logic into a function to be called for each symbol.
-  //
   async function analyzeSymbol(symbol, context) {
     context.log(`--- Starting analysis for ${symbol} ---`);
     const previousZones = await loadPreviousZones();
     const newNotifications = [];
 
     for (const tf of CONFIG.TIMEZONES) {
-      const klines = await getKlines(
-        symbol,
-        tf,
-        CONFIG.KLINE_LIMIT,
-        context
-      );
+      const klines = await getKlines(symbol, tf, CONFIG.KLINE_LIMIT, context);
       if (!klines || klines.length <= CONFIG.SWING_LENGTH) {
         context.log(`Insufficient data for ${symbol} on ${tf}, skipping.`);
         continue;
@@ -303,6 +314,7 @@ module.exports = async (context) => {
         20,
         70
       );
+      
       const allZones = [
         ...bullishOBs
           .filter((ob) => ob.isValid)
@@ -315,32 +327,44 @@ module.exports = async (context) => {
       for (const zone of allZones) {
         if (typeof zone.bottom !== "number" || typeof zone.top !== "number")
           continue;
-        // Include symbol in the identifier to distinguish between BTC and ETH zones
-        const zoneIdentifier = `${symbol}-${zone.startTime.getTime()}-${zone.type}`;
+        
+        // ✅ 使用确认时间作为唯一标识（更准确）
+        const zoneIdentifier = `${symbol}-${zone.confirmationTime.getTime()}-${zone.type}`;
+        
         if (!previousZones.has(zoneIdentifier)) {
           context.log(`New zone found for ${symbol}: ${zoneIdentifier}`);
 
-          const nzTime = zone.startTime.toLocaleString("en-NZ", {
-            timeZone: "Pacific/Auckland",
-            year: "numeric",
-            month: "2-digit",
-            day: "2-digit",
-            hour: "2-digit",
-            minute: "2-digit",
-            second: "2-digit",
-            hour12: false,
-          });
+          // ✅ [修正] 先保存到数据库，再发送通知
+          const saved = await saveNewZone(zoneIdentifier);
+          
+          if (saved) {
+            // ✅ 格式化两个时间
+            const formatNZTime = (date) => date.toLocaleString("en-NZ", {
+              timeZone: "Pacific/Auckland",
+              year: "numeric",
+              month: "2-digit",
+              day: "2-digit",
+              hour: "2-digit",
+              minute: "2-digit",
+              hour12: false,
+            });
 
-          const message = `*🔔 新区域警报: ${symbol} (${tf})*\n\n*类型:* ${
-            zone.type === "Support" ? "🟢 支撑区" : "🔴 阻力区"
-          }\n*价格范围:* ${zone.bottom.toFixed(4)} - ${zone.top.toFixed(
-            4
-          )}\n*形成时间 (NZST/NZDT):* ${nzTime}`;
-          newNotifications.push({
-            message,
-            subject: `新 ${tf} ${zone.type} 区域: ${symbol}`,
-          });
-          await saveNewZone(zoneIdentifier);
+            const obTime = formatNZTime(zone.startTime);
+            const confirmTime = formatNZTime(zone.confirmationTime);
+
+            const message = `*🔔 新区域警报: ${symbol} (${tf})*\n\n` +
+              `*类型:* ${zone.type === "Support" ? "🟢 支撑区 (Bullish OB)" : "🔴 阻力区 (Bearish OB)"}\n` +
+              `*价格范围:* ${zone.bottom.toFixed(2)} - ${zone.top.toFixed(2)}\n` +
+              `*信心等级:* ${zone.confidence === 'high' ? '⭐⭐⭐ 高' : '⭐⭐ 中'}\n` +
+              `*OB 形成时间:* ${obTime}\n` +
+              `*突破确认时间:* ${confirmTime}\n` +
+              `*成交量:* ${zone.volume.toFixed(2)}`;
+
+            newNotifications.push({
+              message,
+              subject: `新 ${tf} ${zone.type} 区域: ${symbol}`,
+            });
+          }
         }
       }
     }
@@ -348,27 +372,23 @@ module.exports = async (context) => {
   }
 
   const allNewNotifications = [];
-  //
-  // ✨ [MODIFIED] Loop through each symbol in the CONFIG and run the analysis.
-  //
+  
   for (const symbol of CONFIG.SYMBOLS) {
-      const notifications = await analyzeSymbol(symbol, context);
-      allNewNotifications.push(...notifications);
+    const notifications = await analyzeSymbol(symbol, context);
+    allNewNotifications.push(...notifications);
   }
-
 
   if (allNewNotifications.length > 0) {
     context.log(
       `Found ${allNewNotifications.length} total new zones. Sending notifications...`
     );
-    await Promise.all(
-      allNewNotifications.map((n) =>
-        Promise.all([
-          sendTelegramNotification(CONFIG, n.message, context),
-          sendEmailNotification(CONFIG, n.subject, n.message, context),
-        ])
-      )
-    );
+    
+    // ✅ 添加延迟避免 Telegram API 限流
+    for (const n of allNewNotifications) {
+      await sendTelegramNotification(CONFIG, n.message, context);
+      await sendEmailNotification(CONFIG, n.subject, n.message, context);
+      await new Promise(resolve => setTimeout(resolve, 1000)); // 1秒延迟
+    }
   } else {
     context.log("No new zones found across all symbols.");
   }
