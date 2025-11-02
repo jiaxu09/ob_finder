@@ -58,14 +58,13 @@ async function getKlines(symbol, interval, limit, context) {
     const response = await axios.get(url, {
       params: { symbol, interval, limit },
     });
-    return response.data.map((k, index) => ({ // ✅ 添加 index
+    return response.data.map((k) => ({
       timestamp: new Date(k[0]),
       open: parseFloat(k[1]),
       high: parseFloat(k[2]),
       low: parseFloat(k[3]),
       close: parseFloat(k[4]),
       volume: parseFloat(k[5]),
-      index, // ✅ 保留原始索引
     }));
   } catch (e) {
     context.error(`Failed to get klines for ${symbol} ${interval}:`, e.message);
@@ -73,182 +72,249 @@ async function getKlines(symbol, interval, limit, context) {
   }
 }
 
-// ✅ [修正] 改进的 OB 识别函数
-function findOrderBlocksStatefulSimulation(
+// ✅ ATR 计算 - 与 Pine Script ta.atr(10) 一致
+function calculateATR(klines, period = 10) {
+  if (klines.length < period + 1) return 0;
+  
+  let trSum = 0;
+  for (let i = klines.length - period; i < klines.length; i++) {
+    const high = klines[i].high;
+    const low = klines[i].low;
+    const prevClose = i > 0 ? klines[i - 1].close : klines[i].close;
+    
+    const tr = Math.max(
+      high - low,
+      Math.abs(high - prevClose),
+      Math.abs(low - prevClose)
+    );
+    trSum += tr;
+  }
+  
+  return trSum / period;
+}
+
+// ✅ 完全按照 Pine Script 逻辑实现的 OB 识别
+function findOrderBlocksPineScriptLogic(
   klines,
-  swingLength,
-  volumeLookback = 20,
-  volumeThresholdPercentile = 70
+  swingLength = 10,
+  obEndMethod = "Wick",
+  maxATRMult = 3.5
 ) {
-  let bullishOBs = []; // ✅ 改用 let 以便重新赋值
-  let bearishOBs = [];
+  const bullishOBs = [];
+  const bearishOBs = [];
+  
+  let swingType = 0;
   let lastSwingHigh = null;
   let lastSwingLow = null;
-
-  function getVolumeThreshold(startIndex, endIndex) {
-    const vols = klines
-      .slice(startIndex, endIndex)
-      .map((k) => k.volume)
-      .filter((v) => v > 0);
-    if (vols.length === 0) return 0;
-    vols.sort((a, b) => a - b);
-    const idx = Math.floor(
-      (volumeThresholdPercentile / 100) * (vols.length - 1)
-    );
-    return vols[idx];
-  }
-
-  for (let i = swingLength; i < klines.length; i++) {
-    const refIndex = i - swingLength;
-    const windowSlice = klines.slice(refIndex + 1, i + 1);
-    if (windowSlice.length === 0) continue;
-
-    const maxHighInWindow = Math.max(...windowSlice.map((c) => c.high));
-    if (klines[refIndex].high > maxHighInWindow) {
-      lastSwingHigh = { ...klines[refIndex], index: refIndex, crossed: false };
-    }
-
-    const minLowInWindow = Math.min(...windowSlice.map((c) => c.low));
-    if (klines[refIndex].low < minLowInWindow) {
-      lastSwingLow = { ...klines[refIndex], index: refIndex, crossed: false };
-    }
-
-    const currentCandle = klines[i];
-
-    // ✅ 看涨 OB 识别
-    if (
-      lastSwingHigh &&
-      !lastSwingHigh.crossed &&
-      currentCandle.close > lastSwingHigh.high
-    ) {
-      const volThresholdForBreakout = getVolumeThreshold(
-        Math.max(0, i - volumeLookback),
-        i
-      );
-      if (currentCandle.volume >= volThresholdForBreakout) {
-        lastSwingHigh.crossed = true;
-        const searchRange = klines.slice(lastSwingHigh.index, i);
-        if (searchRange.length > 0) {
-          let bestCandle = null;
-          const volThresholdForOB = getVolumeThreshold(
-            Math.max(0, lastSwingHigh.index - volumeLookback),
-            i
-          );
-          
-          // ✅ 优先选择高成交量的蜡烛
-          for (const candle of searchRange) {
-            if (candle.volume >= volThresholdForOB) {
-              if (!bestCandle || candle.low < bestCandle.low) {
-                bestCandle = candle;
-              }
-            }
-          }
-          
-          // ✅ 如果没有符合条件的，选择最低点
-          if (!bestCandle) {
-            bestCandle = searchRange.reduce((prev, curr) =>
-              prev.low < curr.low ? prev : curr
-            );
-          }
-          
-          bullishOBs.push({
-            startTime: bestCandle.timestamp, // OB 蜡烛时间
-            confirmationTime: currentCandle.timestamp, // ✅ 突破确认时间
-            confirmationIndex: i, // ✅ 突破确认索引
-            top: bestCandle.high,
-            bottom: bestCandle.low,
-            volume: bestCandle.volume,
-            isValid: true,
-            confidence: bestCandle.volume >= volThresholdForOB ? "high" : "low",
-          });
-        }
-      }
-    }
-
-    // ✅ 看跌 OB 识别
-    if (
-      lastSwingLow &&
-      !lastSwingLow.crossed &&
-      currentCandle.close < lastSwingLow.low
-    ) {
-      const volThresholdForBreakout = getVolumeThreshold(
-        Math.max(0, i - volumeLookback),
-        i
-      );
-      if (currentCandle.volume >= volThresholdForBreakout) {
-        lastSwingLow.crossed = true;
-        const searchRange = klines.slice(lastSwingLow.index, i);
-        if (searchRange.length > 0) {
-          let bestCandle = null;
-          const volThresholdForOB = getVolumeThreshold(
-            Math.max(0, lastSwingLow.index - volumeLookback),
-            i
-          );
-          
-          for (const candle of searchRange) {
-            if (candle.volume >= volThresholdForOB) {
-              if (!bestCandle || candle.high > bestCandle.high) {
-                bestCandle = candle;
-              }
-            }
-          }
-          
-          if (!bestCandle) {
-            bestCandle = searchRange.reduce((prev, curr) =>
-              prev.high > curr.high ? prev : curr
-            );
-          }
-          
-          bearishOBs.push({
-            startTime: bestCandle.timestamp,
-            confirmationTime: currentCandle.timestamp, // ✅
-            confirmationIndex: i, // ✅
-            top: bestCandle.high,
-            bottom: bestCandle.low,
-            volume: bestCandle.volume,
-            isValid: true,
-            confidence: bestCandle.volume >= volThresholdForOB ? "high" : "low",
-          });
-        }
-      }
-    }
-
-    // ✅ [性能优化] 使用 filter 代替遍历修改
-    bullishOBs = bullishOBs.filter(ob => {
-      if (ob.isValid && currentCandle.low < ob.bottom) {
-        return false; // 移除失效的 OB
-      }
-      return true;
-    });
+  
+  const atr = calculateATR(klines, 10);
+  
+  for (let barIndex = swingLength; barIndex < klines.length; barIndex++) {
+    const refIndex = barIndex - swingLength;
     
-    bearishOBs = bearishOBs.filter(ob => {
-      if (ob.isValid && currentCandle.high > ob.top) {
-        return false;
+    // 计算 ta.highest(len) 和 ta.lowest(len)
+    let upper = -Infinity;
+    let lower = Infinity;
+    
+    for (let j = refIndex + 1; j <= barIndex; j++) {
+      if (j < klines.length) {
+        upper = Math.max(upper, klines[j].high);
+        lower = Math.min(lower, klines[j].low);
       }
-      return true;
-    });
+    }
+    
+    // Swing High 识别
+    if (klines[refIndex].high > upper) {
+      if (swingType !== 0) {
+        lastSwingHigh = {
+          index: refIndex,
+          high: klines[refIndex].high,
+          volume: klines[refIndex].volume,
+          crossed: false
+        };
+      }
+      swingType = 0;
+    }
+    
+    // Swing Low 识别
+    if (klines[refIndex].low < lower) {
+      if (swingType !== 1) {
+        lastSwingLow = {
+          index: refIndex,
+          low: klines[refIndex].low,
+          volume: klines[refIndex].volume,
+          crossed: false
+        };
+      }
+      swingType = 1;
+    }
+    
+    const currentCandle = klines[barIndex];
+    
+    // ============ 看涨 OB 形成 ============
+    if (lastSwingHigh && !lastSwingHigh.crossed && currentCandle.close > lastSwingHigh.high) {
+      lastSwingHigh.crossed = true;
+      
+      // 初始化（与 Pine Script 一致）
+      let boxBtm = barIndex >= 1 ? klines[barIndex - 1].high : currentCandle.high;
+      let boxTop = barIndex >= 1 ? klines[barIndex - 1].low : currentCandle.low;
+      let boxLoc = barIndex >= 1 ? klines[barIndex - 1].timestamp : currentCandle.timestamp;
+      
+      // 从 swing high 后到当前bar前搜索最低点
+      const distance = barIndex - lastSwingHigh.index;
+      for (let i = 1; i <= distance - 1; i++) {
+        const candleIndex = barIndex - i;
+        const minVal = klines[candleIndex].low;
+        const maxVal = klines[candleIndex].high;
+        
+        if (minVal < boxBtm) {
+          boxBtm = minVal;
+          boxTop = maxVal;
+          boxLoc = klines[candleIndex].timestamp;
+        }
+      }
+      
+      // 计算成交量（当前bar + 前两根）
+      const vol0 = currentCandle.volume;
+      const vol1 = barIndex >= 1 ? klines[barIndex - 1].volume : 0;
+      const vol2 = barIndex >= 2 ? klines[barIndex - 2].volume : 0;
+      const obVolume = vol0 + vol1 + vol2;
+      const obLowVolume = vol2;
+      const obHighVolume = vol0 + vol1;
+      
+      const obSize = Math.abs(boxTop - boxBtm);
+      
+      // ATR 过滤
+      if (obSize <= atr * maxATRMult) {
+        bullishOBs.push({
+          startTime: boxLoc,
+          confirmationTime: currentCandle.timestamp,
+          confirmationIndex: barIndex,
+          top: boxTop,
+          bottom: boxBtm,
+          obVolume: obVolume,
+          obLowVolume: obLowVolume,
+          obHighVolume: obHighVolume,
+          isValid: true,
+          breaker: false,
+          breakTime: null,
+          type: "Support"
+        });
+      }
+    }
+    
+    // ============ 看跌 OB 形成 ============
+    if (lastSwingLow && !lastSwingLow.crossed && currentCandle.close < lastSwingLow.low) {
+      lastSwingLow.crossed = true;
+      
+      let boxBtm = barIndex >= 1 ? klines[barIndex - 1].low : currentCandle.low;
+      let boxTop = barIndex >= 1 ? klines[barIndex - 1].high : currentCandle.high;
+      let boxLoc = barIndex >= 1 ? klines[barIndex - 1].timestamp : currentCandle.timestamp;
+      
+      // 从 swing low 后到当前bar前搜索最高点
+      const distance = barIndex - lastSwingLow.index;
+      for (let i = 1; i <= distance - 1; i++) {
+        const candleIndex = barIndex - i;
+        const maxVal = klines[candleIndex].high;
+        const minVal = klines[candleIndex].low;
+        
+        if (maxVal > boxTop) {
+          boxTop = maxVal;
+          boxBtm = minVal;
+          boxLoc = klines[candleIndex].timestamp;
+        }
+      }
+      
+      const vol0 = currentCandle.volume;
+      const vol1 = barIndex >= 1 ? klines[barIndex - 1].volume : 0;
+      const vol2 = barIndex >= 2 ? klines[barIndex - 2].volume : 0;
+      const obVolume = vol0 + vol1 + vol2;
+      const obLowVolume = vol0 + vol1;
+      const obHighVolume = vol2;
+      
+      const obSize = Math.abs(boxTop - boxBtm);
+      
+      if (obSize <= atr * maxATRMult) {
+        bearishOBs.push({
+          startTime: boxLoc,
+          confirmationTime: currentCandle.timestamp,
+          confirmationIndex: barIndex,
+          top: boxTop,
+          bottom: boxBtm,
+          obVolume: obVolume,
+          obLowVolume: obLowVolume,
+          obHighVolume: obHighVolume,
+          isValid: true,
+          breaker: false,
+          breakTime: null,
+          type: "Resistance"
+        });
+      }
+    }
+    
+    // ============ OB 失效检测 ============
+    for (let ob of bullishOBs) {
+      if (!ob.breaker) {
+        const testValue = obEndMethod === "Wick" 
+          ? currentCandle.low 
+          : Math.min(currentCandle.open, currentCandle.close);
+        
+        if (testValue < ob.bottom) {
+          ob.breaker = true;
+          ob.breakTime = currentCandle.timestamp;
+        }
+      } else {
+        // breaker 后如果价格突破 top，则完全失效
+        if (currentCandle.high > ob.top) {
+          ob.isValid = false;
+        }
+      }
+    }
+    
+    for (let ob of bearishOBs) {
+      if (!ob.breaker) {
+        const testValue = obEndMethod === "Wick" 
+          ? currentCandle.high 
+          : Math.max(currentCandle.open, currentCandle.close);
+        
+        if (testValue > ob.top) {
+          ob.breaker = true;
+          ob.breakTime = currentCandle.timestamp;
+        }
+      } else {
+        if (currentCandle.low < ob.bottom) {
+          ob.isValid = false;
+        }
+      }
+    }
   }
-
-  return { bullishOBs, bearishOBs };
+  
+  // 只返回有效且未失效的 OB
+  return {
+    bullishOBs: bullishOBs.filter(ob => ob.isValid && !ob.breaker),
+    bearishOBs: bearishOBs.filter(ob => ob.isValid && !ob.breaker)
+  };
 }
 
 // ============================================================================
 // --- Appwrite Function Entrypoint ---
 // ============================================================================
 module.exports = async (context) => {
-  context.log("Function execution started...");
+  context.log("🚀 Function execution started...");
 
   const CONFIG = {
     SYMBOLS: ["BTCUSDT", "ETHUSDT"],
-    TIMEZONES: "1h,4h,1d".split(","),
-    SWING_LENGTH: parseInt("10"),
+    TIMEZONES: ["1h", "4h", "1d"],
+    SWING_LENGTH: 10,
+    OB_END_METHOD: "Wick", // "Wick" 或 "Close"
+    MAX_ATR_MULT: 3.5,
     KLINE_LIMIT: 1000,
 
-    ENABLE_TELEGRAM: "true",
+    ENABLE_TELEGRAM: true,
     TELEGRAM_BOT_TOKEN: "7607543807:AAFcNXDZE_ctPhTQVc60vnX69o0zPjzsLb0",
     TELEGRAM_CHAT_ID: "7510264240",
 
-    ENABLE_EMAIL: "true",
+    ENABLE_EMAIL: true,
     EMAIL_RECIPIENT: "jiaxu99.w@gmail.com",
     EMAIL_CONFIG: {
       service: "gmail",
@@ -297,48 +363,38 @@ module.exports = async (context) => {
   }
 
   async function analyzeSymbol(symbol, context) {
-    context.log(`--- Starting analysis for ${symbol} ---`);
+    context.log(`\n📊 Analyzing ${symbol}...`);
     const previousZones = await loadPreviousZones();
     const newNotifications = [];
 
     for (const tf of CONFIG.TIMEZONES) {
       const klines = await getKlines(symbol, tf, CONFIG.KLINE_LIMIT, context);
       if (!klines || klines.length <= CONFIG.SWING_LENGTH) {
-        context.log(`Insufficient data for ${symbol} on ${tf}, skipping.`);
+        context.log(`⚠️ Insufficient data for ${symbol} ${tf}, skipping.`);
         continue;
       }
 
-      const { bullishOBs, bearishOBs } = findOrderBlocksStatefulSimulation(
+      const { bullishOBs, bearishOBs } = findOrderBlocksPineScriptLogic(
         klines,
         CONFIG.SWING_LENGTH,
-        20,
-        70
+        CONFIG.OB_END_METHOD,
+        CONFIG.MAX_ATR_MULT
       );
       
-      const allZones = [
-        ...bullishOBs
-          .filter((ob) => ob.isValid)
-          .map((z) => ({ ...z, type: "Support" })),
-        ...bearishOBs
-          .filter((ob) => ob.isValid)
-          .map((z) => ({ ...z, type: "Resistance" })),
-      ];
+      context.log(`${symbol} ${tf}: ${bullishOBs.length} 🟢 bullish | ${bearishOBs.length} 🔴 bearish OBs`);
+      
+      const allZones = [...bullishOBs, ...bearishOBs];
 
       for (const zone of allZones) {
-        if (typeof zone.bottom !== "number" || typeof zone.top !== "number")
-          continue;
-        
-        // ✅ 使用确认时间作为唯一标识（更准确）
-        const zoneIdentifier = `${symbol}-${zone.confirmationTime.getTime()}-${zone.type}`;
+        // ✅ 使用 OB 蜡烛时间作为唯一标识（与 Pine Script 的 boxLoc 一致）
+        const zoneIdentifier = `${symbol}-${tf}-${zone.startTime.getTime()}-${zone.type}`;
         
         if (!previousZones.has(zoneIdentifier)) {
-          context.log(`New zone found for ${symbol}: ${zoneIdentifier}`);
+          context.log(`🆕 New zone: ${zoneIdentifier}`);
 
-          // ✅ [修正] 先保存到数据库，再发送通知
           const saved = await saveNewZone(zoneIdentifier);
           
           if (saved) {
-            // ✅ 格式化两个时间
             const formatNZTime = (date) => date.toLocaleString("en-NZ", {
               timeZone: "Pacific/Auckland",
               year: "numeric",
@@ -346,23 +402,34 @@ module.exports = async (context) => {
               day: "2-digit",
               hour: "2-digit",
               minute: "2-digit",
+              second: "2-digit",
               hour12: false,
             });
 
             const obTime = formatNZTime(zone.startTime);
             const confirmTime = formatNZTime(zone.confirmationTime);
+            
+            // 计算成交量比例
+            const percentage = Math.round(
+              (Math.min(zone.obHighVolume, zone.obLowVolume) / 
+               Math.max(zone.obHighVolume, zone.obLowVolume)) * 100
+            );
 
-            const message = `*🔔 新区域警报: ${symbol} (${tf})*\n\n` +
-              `*类型:* ${zone.type === "Support" ? "🟢 支撑区 (Bullish OB)" : "🔴 阻力区 (Bearish OB)"}\n` +
-              `*价格范围:* ${zone.bottom.toFixed(2)} - ${zone.top.toFixed(2)}\n` +
-              `*信心等级:* ${zone.confidence === 'high' ? '⭐⭐⭐ 高' : '⭐⭐ 中'}\n` +
+            const priceRange = `${zone.bottom.toFixed(zone.bottom > 100 ? 2 : 4)} - ${zone.top.toFixed(zone.top > 100 ? 2 : 4)}`;
+
+            const message = `*🔔 新 Order Block 区域警报*\n\n` +
+              `*交易对:* ${symbol}\n` +
+              `*时间周期:* ${tf}\n` +
+              `*类型:* ${zone.type === "Support" ? "🟢 看涨支撑区 (Bullish OB)" : "🔴 看跌阻力区 (Bearish OB)"}\n` +
+              `*价格区间:* ${priceRange}\n` +
+              `*总成交量:* ${zone.obVolume.toFixed(0)} (平衡度: ${percentage}%)\n` +
               `*OB 形成时间:* ${obTime}\n` +
-              `*突破确认时间:* ${confirmTime}\n` +
-              `*成交量:* ${zone.volume.toFixed(2)}`;
+              `*突破确认时间:* ${confirmTime}\n\n` +
+              `_此区域基于 Pine Script 逻辑识别，与 TradingView 指标一致_`;
 
             newNotifications.push({
               message,
-              subject: `新 ${tf} ${zone.type} 区域: ${symbol}`,
+              subject: `🔔 ${symbol} ${tf} 新${zone.type}区域`,
             });
           }
         }
@@ -380,22 +447,22 @@ module.exports = async (context) => {
 
   if (allNewNotifications.length > 0) {
     context.log(
-      `Found ${allNewNotifications.length} total new zones. Sending notifications...`
+      `\n✉️ Sending ${allNewNotifications.length} notification(s)...`
     );
     
-    // ✅ 添加延迟避免 Telegram API 限流
     for (const n of allNewNotifications) {
       await sendTelegramNotification(CONFIG, n.message, context);
       await sendEmailNotification(CONFIG, n.subject, n.message, context);
-      await new Promise(resolve => setTimeout(resolve, 1000)); // 1秒延迟
+      await new Promise(resolve => setTimeout(resolve, 1000)); // 避免 API 限流
     }
   } else {
-    context.log("No new zones found across all symbols.");
+    context.log("\n✅ No new zones found across all symbols.");
   }
 
-  context.log("Function execution finished successfully.");
+  context.log("\n🎉 Function execution finished successfully.");
   return context.res.json({
     success: true,
     new_zones_found: allNewNotifications.length,
+    timestamp: new Date().toISOString()
   });
 };
