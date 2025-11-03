@@ -311,24 +311,24 @@ module.exports = async (context) => {
     KLINE_LIMIT: 1000,
 
     ENABLE_TELEGRAM: true,
-    TELEGRAM_BOT_TOKEN: "YOUR_TELEGRAM_BOT_TOKEN",
-    TELEGRAM_CHAT_ID: "YOUR_TELEGRAM_CHAT_ID",
+    TELEGRAM_BOT_TOKEN: "7607543807:AAFcNXDZE_ctPhTQVc60vnX69o0zPjzsLb0",
+    TELEGRAM_CHAT_ID: "7510264240",
 
     ENABLE_EMAIL: true,
-    EMAIL_RECIPIENT: "YOUR_EMAIL@example.com",
+    EMAIL_RECIPIENT: "jiaxu99.w@gmail.com",
     EMAIL_CONFIG: {
       service: "gmail",
-      auth: { user: "YOUR_GMAIL_USER@gmail.com", pass: "YOUR_GMAIL_APP_PASSWORD" },
+      auth: { user: "jiaxu99.w@gmail.com", pass: "hqmv qwbm qpik juiq" },
     },
   };
 
   const client = new Client()
-    .setEndpoint(process.env.APPWRITE_ENDPOINT)
-    .setProject(process.env.APPWRITE_PROJECT_ID)
-    .setKey(process.env.APPWRITE_API_KEY);
+    .setEndpoint('https://syd.cloud.appwrite.io/v1')
+    .setProject('68f59e58002322d3d474')
+    .setKey('standard_2555e90b24b6442cafa174ecccc387d2668557a61d73186f705f7e65681f9ed2cbbf5a672f55669cb9a549a5a8a282b2f1dd32e3f3a1a818dd06c2ce4e23f72da594fddd5dfcd736f0bb04d1151962a6fb9568a25c700e8d4746eddc96ec2538556dd23e696117ad6ebdbdb05856a5250fb125e03b3484fd6b73e24d245c59e8');
 
   const databases = new Databases(client);
-  const DB_ID = "YOUR_DATABASE_ID";
+  const DB_ID = "68f5a3fa001774a5ab3d";
   const COLLECTION_ID = "seen_zones";
 
   async function loadPreviousZones() {
