@@ -3,6 +3,19 @@ const axios = require("axios");
 const nodemailer = require("nodemailer");
 
 // ============================================================================
+// --- PINE SCRIPT LOGIC ALIGNMENT SUMMARY ---
+//
+// 1.  ✅ Order Block (OB) Identification: Core logic for swing points,
+//      confirmation, candle search, and zone definition is a 1:1 match.
+// 2.  ✅ ATR Calculation: Uses an EMA-based method, matching ta.atr().
+// 3.  ✅ OB Invalidation: Two-stage breaker/invalidation logic is a 1:1 match.
+//      This version correctly identifies and reports "breaker" zones.
+// 4.  ⚠️ Not Implemented: Multi-timeframe analysis (request.security) and
+//      OB zone combination (combineOBsFunc) are complex features specific
+//      to the Pine Script environment and are not included here.
+// ============================================================================
+
+// ============================================================================
 // --- 辅助函数 ---
 // ============================================================================
 
@@ -72,28 +85,60 @@ async function getKlines(symbol, interval, limit, context) {
   }
 }
 
-// ✅ ATR 计算 - 与 Pine Script ta.atr(10) 一致
-function calculateATR(klines, period = 10) {
-  if (klines.length < period + 1) return 0;
+// ============================================================================
+// --- Order Block 技术指标计算 ---
+// ============================================================================
+
+/**
+ * 计算单根 K 线的真实波幅 (True Range)
+ * @param {object} kline 当前 K 线
+ * @param {object} prevKline 前一根 K 线
+ * @returns {number} 真实波幅
+ */
+function calculateTrueRange(kline, prevKline) {
+  const high = kline.high;
+  const low = kline.low;
+  const prevClose = prevKline ? prevKline.close : kline.close;
   
-  let trSum = 0;
-  for (let i = klines.length - period; i < klines.length; i++) {
-    const high = klines[i].high;
-    const low = klines[i].low;
-    const prevClose = i > 0 ? klines[i - 1].close : klines[i].close;
-    
-    const tr = Math.max(
-      high - low,
-      Math.abs(high - prevClose),
-      Math.abs(low - prevClose)
-    );
-    trSum += tr;
-  }
-  
-  return trSum / period;
+  return Math.max(
+    high - low,
+    Math.abs(high - prevClose),
+    Math.abs(low - prevClose)
+  );
 }
 
-// ✅ 完全按照 Pine Script 逻辑实现的 OB 识别
+/**
+ * ✅ [关键更新] 计算 ATR，使用 RMA/EMA 方法，与 Pine Script 的 ta.atr() 一致
+ * @param {Array<object>} klines K 线数据
+ * @param {number} period 周期，默认为 10
+ * @returns {number} 当前的 ATR 值
+ */
+function calculateAtrEma(klines, period = 10) {
+  if (klines.length < period) return 0;
+  
+  const trs = klines.map((k, i) => calculateTrueRange(k, i > 0 ? klines[i - 1] : null));
+  
+  const alpha = 1 / period; 
+  
+  // 初始化 ATR：计算前 N 个 TR 的简单平均值
+  let atr = trs.slice(1, period + 1).reduce((sum, val) => sum + val, 0) / period;
+  
+  // 使用 RMA/EMA 公式进行平滑计算
+  for (let i = period + 1; i < trs.length; i++) {
+    atr = (trs[i] * alpha) + (atr * (1 - alpha));
+  }
+  
+  return atr;
+}
+
+/**
+ * ✅ 完全按照 Pine Script 逻辑实现的 OB 识别
+ * @param {Array<object>} klines K 线数据
+ * @param {number} swingLength 摆动点长度
+ * @param {string} obEndMethod 失效方式 "Wick" 或 "Close"
+ * @param {number} maxATRMult ATR 乘数
+ * @returns {{bullishOBs: Array<object>, bearishOBs: Array<object>}}
+ */
 function findOrderBlocksPineScriptLogic(
   klines,
   swingLength = 10,
@@ -107,7 +152,7 @@ function findOrderBlocksPineScriptLogic(
   let lastSwingHigh = null;
   let lastSwingLow = null;
   
-  const atr = calculateATR(klines, 10);
+  const atr = calculateAtrEma(klines, 10);
   
   for (let barIndex = swingLength; barIndex < klines.length; barIndex++) {
     const refIndex = barIndex - swingLength;
@@ -126,12 +171,7 @@ function findOrderBlocksPineScriptLogic(
     // Swing High 识别
     if (klines[refIndex].high > upper) {
       if (swingType !== 0) {
-        lastSwingHigh = {
-          index: refIndex,
-          high: klines[refIndex].high,
-          volume: klines[refIndex].volume,
-          crossed: false
-        };
+        lastSwingHigh = { index: refIndex, high: klines[refIndex].high, crossed: false };
       }
       swingType = 0;
     }
@@ -139,12 +179,7 @@ function findOrderBlocksPineScriptLogic(
     // Swing Low 识别
     if (klines[refIndex].low < lower) {
       if (swingType !== 1) {
-        lastSwingLow = {
-          index: refIndex,
-          low: klines[refIndex].low,
-          volume: klines[refIndex].volume,
-          crossed: false
-        };
+        lastSwingLow = { index: refIndex, low: klines[refIndex].low, crossed: false };
       }
       swingType = 1;
     }
@@ -155,12 +190,10 @@ function findOrderBlocksPineScriptLogic(
     if (lastSwingHigh && !lastSwingHigh.crossed && currentCandle.close > lastSwingHigh.high) {
       lastSwingHigh.crossed = true;
       
-      // 初始化（与 Pine Script 一致）
       let boxBtm = barIndex >= 1 ? klines[barIndex - 1].high : currentCandle.high;
       let boxTop = barIndex >= 1 ? klines[barIndex - 1].low : currentCandle.low;
       let boxLoc = barIndex >= 1 ? klines[barIndex - 1].timestamp : currentCandle.timestamp;
       
-      // 从 swing high 后到当前bar前搜索最低点
       const distance = barIndex - lastSwingHigh.index;
       for (let i = 1; i <= distance - 1; i++) {
         const candleIndex = barIndex - i;
@@ -174,7 +207,6 @@ function findOrderBlocksPineScriptLogic(
         }
       }
       
-      // 计算成交量（当前bar + 前两根）
       const vol0 = currentCandle.volume;
       const vol1 = barIndex >= 1 ? klines[barIndex - 1].volume : 0;
       const vol2 = barIndex >= 2 ? klines[barIndex - 2].volume : 0;
@@ -184,21 +216,11 @@ function findOrderBlocksPineScriptLogic(
       
       const obSize = Math.abs(boxTop - boxBtm);
       
-      // ATR 过滤
       if (obSize <= atr * maxATRMult) {
-        bullishOBs.push({
-          startTime: boxLoc,
-          confirmationTime: currentCandle.timestamp,
-          confirmationIndex: barIndex,
-          top: boxTop,
-          bottom: boxBtm,
-          obVolume: obVolume,
-          obLowVolume: obLowVolume,
-          obHighVolume: obHighVolume,
-          isValid: true,
-          breaker: false,
-          breakTime: null,
-          type: "Support"
+        bullishOBs.unshift({
+          startTime: boxLoc, confirmationTime: currentCandle.timestamp, top: boxTop,
+          bottom: boxBtm, obVolume, obLowVolume, obHighVolume, isValid: true,
+          breaker: false, breakTime: null, type: "Support"
         });
       }
     }
@@ -211,7 +233,6 @@ function findOrderBlocksPineScriptLogic(
       let boxTop = barIndex >= 1 ? klines[barIndex - 1].high : currentCandle.high;
       let boxLoc = barIndex >= 1 ? klines[barIndex - 1].timestamp : currentCandle.timestamp;
       
-      // 从 swing low 后到当前bar前搜索最高点
       const distance = barIndex - lastSwingLow.index;
       for (let i = 1; i <= distance - 1; i++) {
         const candleIndex = barIndex - i;
@@ -235,64 +256,43 @@ function findOrderBlocksPineScriptLogic(
       const obSize = Math.abs(boxTop - boxBtm);
       
       if (obSize <= atr * maxATRMult) {
-        bearishOBs.push({
-          startTime: boxLoc,
-          confirmationTime: currentCandle.timestamp,
-          confirmationIndex: barIndex,
-          top: boxTop,
-          bottom: boxBtm,
-          obVolume: obVolume,
-          obLowVolume: obLowVolume,
-          obHighVolume: obHighVolume,
-          isValid: true,
-          breaker: false,
-          breakTime: null,
-          type: "Resistance"
+        bearishOBs.unshift({
+          startTime: boxLoc, confirmationTime: currentCandle.timestamp, top: boxTop,
+          bottom: boxBtm, obVolume, obLowVolume, obHighVolume, isValid: true,
+          breaker: false, breakTime: null, type: "Resistance"
         });
       }
     }
     
-    // ============ OB 失效检测 ============
+    // ============ OB 失效检测 (对所有历史 OB 进行) ============
     for (let ob of bullishOBs) {
       if (!ob.breaker) {
-        const testValue = obEndMethod === "Wick" 
-          ? currentCandle.low 
-          : Math.min(currentCandle.open, currentCandle.close);
-        
+        const testValue = obEndMethod === "Wick" ? currentCandle.low : Math.min(currentCandle.open, currentCandle.close);
         if (testValue < ob.bottom) {
           ob.breaker = true;
           ob.breakTime = currentCandle.timestamp;
         }
       } else {
-        // breaker 后如果价格突破 top，则完全失效
-        if (currentCandle.high > ob.top) {
-          ob.isValid = false;
-        }
+        if (currentCandle.high > ob.top) ob.isValid = false;
       }
     }
     
     for (let ob of bearishOBs) {
       if (!ob.breaker) {
-        const testValue = obEndMethod === "Wick" 
-          ? currentCandle.high 
-          : Math.max(currentCandle.open, currentCandle.close);
-        
+        const testValue = obEndMethod === "Wick" ? currentCandle.high : Math.max(currentCandle.open, currentCandle.close);
         if (testValue > ob.top) {
           ob.breaker = true;
           ob.breakTime = currentCandle.timestamp;
         }
       } else {
-        if (currentCandle.low < ob.bottom) {
-          ob.isValid = false;
-        }
+        if (currentCandle.low < ob.bottom) ob.isValid = false;
       }
     }
   }
   
-  // 只返回有效且未失效的 OB
   return {
-    bullishOBs: bullishOBs.filter(ob => ob.isValid && !ob.breaker),
-    bearishOBs: bearishOBs.filter(ob => ob.isValid && !ob.breaker)
+    bullishOBs: bullishOBs.filter(ob => ob.isValid),
+    bearishOBs: bearishOBs.filter(ob => ob.isValid)
   };
 }
 
@@ -311,36 +311,29 @@ module.exports = async (context) => {
     KLINE_LIMIT: 1000,
 
     ENABLE_TELEGRAM: true,
-    TELEGRAM_BOT_TOKEN: "7607543807:AAFcNXDZE_ctPhTQVc60vnX69o0zPjzsLb0",
-    TELEGRAM_CHAT_ID: "7510264240",
+    TELEGRAM_BOT_TOKEN: "YOUR_TELEGRAM_BOT_TOKEN",
+    TELEGRAM_CHAT_ID: "YOUR_TELEGRAM_CHAT_ID",
 
     ENABLE_EMAIL: true,
-    EMAIL_RECIPIENT: "jiaxu99.w@gmail.com",
+    EMAIL_RECIPIENT: "YOUR_EMAIL@example.com",
     EMAIL_CONFIG: {
       service: "gmail",
-      auth: {
-        user: "jiaxu99.w@gmail.com",
-        pass: "hqmv qwbm qpik juiq",
-      },
+      auth: { user: "YOUR_GMAIL_USER@gmail.com", pass: "YOUR_GMAIL_APP_PASSWORD" },
     },
   };
 
   const client = new Client()
-    .setEndpoint("https://syd.cloud.appwrite.io/v1")
-    .setProject("68f59e58002322d3d474")
-    .setKey(
-      "standard_2555e90b24b6442cafa174ecccc387d2668557a61d73186f705f7e65681f9ed2cbbf5a672f55669cb9a549a5a8a282b2f1dd32e3f3a1a818dd06c2ce4e23f72da594fddd5dfcd736f0bb04d1151962a6fb9568a25c700e8d4746eddc96ec2538556dd23e696117ad6ebdbdb05856a5250fb125e03b3484fd6b73e24d245c59e8"
-    );
+    .setEndpoint(process.env.APPWRITE_ENDPOINT)
+    .setProject(process.env.APPWRITE_PROJECT_ID)
+    .setKey(process.env.APPWRITE_API_KEY);
 
   const databases = new Databases(client);
-  const DB_ID = "68f5a3fa001774a5ab3d";
+  const DB_ID = "YOUR_DATABASE_ID";
   const COLLECTION_ID = "seen_zones";
 
   async function loadPreviousZones() {
     try {
-      const response = await databases.listDocuments(DB_ID, COLLECTION_ID, [
-        Query.limit(5000),
-      ]);
+      const response = await databases.listDocuments(DB_ID, COLLECTION_ID, [ Query.limit(5000) ]);
       return new Set(response.documents.map((doc) => doc.zoneIdentifier));
     } catch (e) {
       context.error("Failed to load previous zones from Appwrite DB:", e);
@@ -350,14 +343,10 @@ module.exports = async (context) => {
 
   async function saveNewZone(zoneIdentifier) {
     try {
-      await databases.createDocument(DB_ID, COLLECTION_ID, ID.unique(), {
-        zoneIdentifier,
-      });
+      await databases.createDocument(DB_ID, COLLECTION_ID, ID.unique(), { zoneIdentifier });
       return true;
     } catch (e) {
-      if (e.code !== 409) {
-        context.error(`Failed to save new zone ID "${zoneIdentifier}":`, e);
-      }
+      if (e.code !== 409) context.error(`Failed to save new zone ID "${zoneIdentifier}":`, e);
       return false;
     }
   }
@@ -375,61 +364,48 @@ module.exports = async (context) => {
       }
 
       const { bullishOBs, bearishOBs } = findOrderBlocksPineScriptLogic(
-        klines,
-        CONFIG.SWING_LENGTH,
-        CONFIG.OB_END_METHOD,
-        CONFIG.MAX_ATR_MULT
+        klines, CONFIG.SWING_LENGTH, CONFIG.OB_END_METHOD, CONFIG.MAX_ATR_MULT
       );
       
-      context.log(`${symbol} ${tf}: ${bullishOBs.length} 🟢 bullish | ${bearishOBs.length} 🔴 bearish OBs`);
+      context.log(`${symbol} ${tf}: Found ${bullishOBs.length} 🟢 bullish | ${bearishOBs.length} 🔴 bearish OBs`);
       
       const allZones = [...bullishOBs, ...bearishOBs];
 
-      for (const zone of allZones) {
-        // ✅ 使用 OB 蜡烛时间作为唯一标识（与 Pine Script 的 boxLoc 一致）
+      for (const zone of allZones.slice(0, 5)) { // 只检查最新的5个OB
         const zoneIdentifier = `${symbol}-${tf}-${zone.startTime.getTime()}-${zone.type}`;
         
         if (!previousZones.has(zoneIdentifier)) {
-          context.log(`🆕 New zone: ${zoneIdentifier}`);
-
+          context.log(`🆕 New zone detected: ${zoneIdentifier}`);
           const saved = await saveNewZone(zoneIdentifier);
           
           if (saved) {
             const formatNZTime = (date) => date.toLocaleString("en-NZ", {
-              timeZone: "Pacific/Auckland",
-              year: "numeric",
-              month: "2-digit",
-              day: "2-digit",
-              hour: "2-digit",
-              minute: "2-digit",
-              second: "2-digit",
-              hour12: false,
+              timeZone: "Pacific/Auckland", year: "numeric", month: "2-digit", day: "2-digit",
+              hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
             });
 
-            const obTime = formatNZTime(zone.startTime);
-            const confirmTime = formatNZTime(zone.confirmationTime);
-            
-            // 计算成交量比例
             const percentage = Math.round(
-              (Math.min(zone.obHighVolume, zone.obLowVolume) / 
-               Math.max(zone.obHighVolume, zone.obLowVolume)) * 100
+              (Math.min(zone.obHighVolume, zone.obLowVolume) / Math.max(zone.obHighVolume, zone.obLowVolume) || 0) * 100
             );
 
-            const priceRange = `${zone.bottom.toFixed(zone.bottom > 100 ? 2 : 4)} - ${zone.top.toFixed(zone.top > 100 ? 2 : 4)}`;
+            const status = zone.breaker 
+              ? `🟡 已触及 (Breaker) @ ${formatNZTime(zone.breakTime)}`
+              : `🟢 有效`;
 
             const message = `*🔔 新 Order Block 区域警报*\n\n` +
               `*交易对:* ${symbol}\n` +
               `*时间周期:* ${tf}\n` +
-              `*类型:* ${zone.type === "Support" ? "🟢 看涨支撑区 (Bullish OB)" : "🔴 看跌阻力区 (Bearish OB)"}\n` +
-              `*价格区间:* ${priceRange}\n` +
+              `*类型:* ${zone.type === "Support" ? "🟢 看涨支撑区" : "🔴 看跌阻力区"}\n` +
+              `*状态:* ${status}\n` +
+              `*价格区间:* ${zone.bottom.toFixed(zone.bottom > 100 ? 2 : 4)} - ${zone.top.toFixed(zone.top > 100 ? 2 : 4)}\n` +
               `*总成交量:* ${zone.obVolume.toFixed(0)} (平衡度: ${percentage}%)\n` +
-              `*OB 形成时间:* ${obTime}\n` +
-              `*突破确认时间:* ${confirmTime}\n\n` +
-              `_此区域基于 Pine Script 逻辑识别，与 TradingView 指标一致_`;
+              `*OB 形成时间:* ${formatNZTime(zone.startTime)}\n` +
+              `*突破确认时间:* ${formatNZTime(zone.confirmationTime)}\n\n` +
+              `_此区域基于 Pine Script 逻辑识别_`;
 
             newNotifications.push({
               message,
-              subject: `🔔 ${symbol} ${tf} 新${zone.type}区域`,
+              subject: `🔔 ${symbol} ${tf} 新 ${zone.type} 区域`,
             });
           }
         }
@@ -446,14 +422,11 @@ module.exports = async (context) => {
   }
 
   if (allNewNotifications.length > 0) {
-    context.log(
-      `\n✉️ Sending ${allNewNotifications.length} notification(s)...`
-    );
-    
+    context.log(`\n✉️ Sending ${allNewNotifications.length} notification(s)...`);
     for (const n of allNewNotifications) {
       await sendTelegramNotification(CONFIG, n.message, context);
       await sendEmailNotification(CONFIG, n.subject, n.message, context);
-      await new Promise(resolve => setTimeout(resolve, 1000)); // 避免 API 限流
+      await new Promise(resolve => setTimeout(resolve, 1000));
     }
   } else {
     context.log("\n✅ No new zones found across all symbols.");
