@@ -3,12 +3,12 @@ const axios = require("axios");
 const nodemailer = require("nodemailer");
 
 // ============================================================================
-// --- ENHANCED ORDER BLOCK DETECTION WITH VOLUME CONFIRMATION ---
+// --- ENHANCED ORDER BLOCK DETECTION WITH VOLUME & BALANCE FILTER ---
 //
-// ✅ 新增功能：
-// 1. SMA20 成交量计算
-// 2. 突破K线必须满足：Volume > SMA20 × 1.2
-// 3. 不合格的OB直接过滤，不发送通知
+// ✅ 核心功能：
+// 1. SMA20 成交量确认（Volume > SMA20 × 1.2）
+// 2. 平衡度计算与过滤（仅保留 20% - 80% 之间）
+// 3. 多维度风险评估与通知
 // ============================================================================
 
 // ============================================================================
@@ -119,11 +119,7 @@ function calculateAtrEma(klines, period = 10) {
 }
 
 /**
- * ✅ [新增] 计算成交量的简单移动平均线 (SMA)
- * @param {Array<object>} klines K线数据
- * @param {number} endIndex 当前K线索引
- * @param {number} period SMA周期，默认20
- * @returns {number} 成交量SMA值
+ * 计算成交量的简单移动平均线 (SMA)
  */
 function calculateVolumeSMA(klines, endIndex, period = 20) {
   if (endIndex < period - 1) return 0;
@@ -138,14 +134,34 @@ function calculateVolumeSMA(klines, endIndex, period = 20) {
 }
 
 /**
- * ✅ [增强版] Order Block 识别 - 带成交量确认
- * @param {Array<object>} klines K线数据
- * @param {number} swingLength 摆动点长度
- * @param {string} obEndMethod 失效方式
- * @param {number} maxATRMult ATR乘数
- * @param {number} volumeMultiplier 成交量乘数（默认1.2）
- * @param {number} volumeSMAPeriod 成交量SMA周期（默认20）
- * @returns {{bullishOBs: Array, bearishOBs: Array, stats: object}}
+ * ✅ [新增] 计算平衡度
+ * @param {number} obHighVolume 高成交量部分
+ * @param {number} obLowVolume 低成交量部分
+ * @returns {number} 平衡度百分比 (0-100)
+ */
+function calculateBalancePercentage(obHighVolume, obLowVolume) {
+  const maxVol = Math.max(obHighVolume, obLowVolume);
+  const minVol = Math.min(obHighVolume, obLowVolume);
+  
+  if (maxVol === 0) return 0;
+  
+  return Math.round((minVol / maxVol) * 100);
+}
+
+/**
+ * ✅ [新增] 评估平衡度质量
+ * @param {number} balance 平衡度百分比
+ * @returns {string} 质量评级
+ */
+function evaluateBalanceQuality(balance) {
+  if (balance >= 60 && balance <= 80) return "🟢 优秀";
+  if (balance >= 40 && balance < 60) return "🟡 良好";
+  if (balance >= 20 && balance < 40) return "🟠 一般";
+  return "🔴 较差";
+}
+
+/**
+ * ✅ [增强版] Order Block 识别 - 带成交量确认与平衡度过滤
  */
 function findOrderBlocksPineScriptLogic(
   klines,
@@ -153,7 +169,9 @@ function findOrderBlocksPineScriptLogic(
   obEndMethod = "Wick",
   maxATRMult = 3.5,
   volumeMultiplier = 1.2,
-  volumeSMAPeriod = 20
+  volumeSMAPeriod = 20,
+  minBalancePercent = 20,  // ✅ 新增参数
+  maxBalancePercent = 80   // ✅ 新增参数
 ) {
   const bullishOBs = [];
   const bearishOBs = [];
@@ -164,6 +182,8 @@ function findOrderBlocksPineScriptLogic(
     totalBearishSignals: 0,
     bullishRejectedByVolume: 0,
     bearishRejectedByVolume: 0,
+    bullishRejectedByBalance: 0,  // ✅ 新增
+    bearishRejectedByBalance: 0,  // ✅ 新增
   };
   
   let swingType = 0;
@@ -203,12 +223,12 @@ function findOrderBlocksPineScriptLogic(
     
     const currentCandle = klines[barIndex];
     
-    // ============ 🟢 看涨 OB 形成（带成交量确认）============
+    // ============ 🟢 看涨 OB 形成（带成交量确认 + 平衡度过滤）============
     if (lastSwingHigh && !lastSwingHigh.crossed && currentCandle.close > lastSwingHigh.high) {
       lastSwingHigh.crossed = true;
       stats.totalBullishSignals++;
       
-      // ✅ 成交量确认：突破K线必须满足成交量要求
+      // ✅ 第一步：成交量确认
       const volumeSMA20 = calculateVolumeSMA(klines, barIndex, volumeSMAPeriod);
       const volumeThreshold = volumeSMA20 * volumeMultiplier;
       
@@ -241,6 +261,14 @@ function findOrderBlocksPineScriptLogic(
       const obLowVolume = vol2;
       const obHighVolume = vol0 + vol1;
       
+      // ✅ 第二步：平衡度过滤
+      const balancePercent = calculateBalancePercentage(obHighVolume, obLowVolume);
+      
+      if (balancePercent < minBalancePercent || balancePercent > maxBalancePercent) {
+        stats.bullishRejectedByBalance++;
+        continue; // ❌ 平衡度不符合要求，忽略此OB
+      }
+      
       const obSize = Math.abs(boxTop - boxBtm);
       
       if (obSize <= atr * maxATRMult) {
@@ -252,9 +280,11 @@ function findOrderBlocksPineScriptLogic(
           obVolume,
           obLowVolume,
           obHighVolume,
-          breakoutVolume: currentCandle.volume, // ✅ 新增：突破K线成交量
-          volumeSMA20, // ✅ 新增：当时的SMA20
-          volumeRatio: (currentCandle.volume / volumeSMA20).toFixed(2), // ✅ 新增：成交量比率
+          breakoutVolume: currentCandle.volume,
+          volumeSMA20,
+          volumeRatio: (currentCandle.volume / volumeSMA20).toFixed(2),
+          balancePercent,  // ✅ 新增：平衡度
+          balanceQuality: evaluateBalanceQuality(balancePercent),  // ✅ 新增：平衡度评级
           isValid: true,
           breaker: false,
           breakTime: null,
@@ -263,12 +293,12 @@ function findOrderBlocksPineScriptLogic(
       }
     }
     
-    // ============ 🔴 看跌 OB 形成（带成交量确认）============
+    // ============ 🔴 看跌 OB 形成（带成交量确认 + 平衡度过滤）============
     if (lastSwingLow && !lastSwingLow.crossed && currentCandle.close < lastSwingLow.low) {
       lastSwingLow.crossed = true;
       stats.totalBearishSignals++;
       
-      // ✅ 成交量确认：突破K线必须满足成交量要求
+      // ✅ 第一步：成交量确认
       const volumeSMA20 = calculateVolumeSMA(klines, barIndex, volumeSMAPeriod);
       const volumeThreshold = volumeSMA20 * volumeMultiplier;
       
@@ -301,6 +331,14 @@ function findOrderBlocksPineScriptLogic(
       const obLowVolume = vol0 + vol1;
       const obHighVolume = vol2;
       
+      // ✅ 第二步：平衡度过滤
+      const balancePercent = calculateBalancePercentage(obHighVolume, obLowVolume);
+      
+      if (balancePercent < minBalancePercent || balancePercent > maxBalancePercent) {
+        stats.bearishRejectedByBalance++;
+        continue; // ❌ 平衡度不符合要求，忽略此OB
+      }
+      
       const obSize = Math.abs(boxTop - boxBtm);
       
       if (obSize <= atr * maxATRMult) {
@@ -312,9 +350,11 @@ function findOrderBlocksPineScriptLogic(
           obVolume,
           obLowVolume,
           obHighVolume,
-          breakoutVolume: currentCandle.volume, // ✅ 新增
-          volumeSMA20, // ✅ 新增
-          volumeRatio: (currentCandle.volume / volumeSMA20).toFixed(2), // ✅ 新增
+          breakoutVolume: currentCandle.volume,
+          volumeSMA20,
+          volumeRatio: (currentCandle.volume / volumeSMA20).toFixed(2),
+          balancePercent,  // ✅ 新增：平衡度
+          balanceQuality: evaluateBalanceQuality(balancePercent),  // ✅ 新增：平衡度评级
           isValid: true,
           breaker: false,
           breakTime: null,
@@ -370,9 +410,13 @@ module.exports = async (context) => {
     MAX_ATR_MULT: 3.5,
     KLINE_LIMIT: 1000,
     
-    // ✅ 新增：成交量过滤参数
-    VOLUME_MULTIPLIER: 1.2, // 突破K线成交量必须 > SMA20 × 1.2
-    VOLUME_SMA_PERIOD: 20,  // 成交量SMA周期
+    // ✅ 成交量过滤参数
+    VOLUME_MULTIPLIER: 1.2,
+    VOLUME_SMA_PERIOD: 20,
+    
+    // ✅ 新增：平衡度过滤参数
+    MIN_BALANCE_PERCENT: 20,  // 最小平衡度 20%
+    MAX_BALANCE_PERCENT: 80,  // 最大平衡度 80%
 
     ENABLE_TELEGRAM: true,
     TELEGRAM_BOT_TOKEN: "7607543807:AAFcNXDZE_ctPhTQVc60vnX69o0zPjzsLb0",
@@ -433,14 +477,18 @@ module.exports = async (context) => {
         CONFIG.OB_END_METHOD,
         CONFIG.MAX_ATR_MULT,
         CONFIG.VOLUME_MULTIPLIER,
-        CONFIG.VOLUME_SMA_PERIOD
+        CONFIG.VOLUME_SMA_PERIOD,
+        CONFIG.MIN_BALANCE_PERCENT,  // ✅ 传入平衡度参数
+        CONFIG.MAX_BALANCE_PERCENT   // ✅ 传入平衡度参数
       );
       
-      // ✅ 增强日志：显示过滤统计
+      // ✅ 增强日志：显示完整过滤统计
       context.log(
         `${symbol} ${tf}: ` +
-        `🟢 ${bullishOBs.length} bullish OBs (${stats.bullishRejectedByVolume} rejected by volume) | ` +
-        `🔴 ${bearishOBs.length} bearish OBs (${stats.bearishRejectedByVolume} rejected by volume)`
+        `🟢 ${bullishOBs.length} bullish OBs ` +
+        `(${stats.bullishRejectedByVolume} by volume, ${stats.bullishRejectedByBalance} by balance) | ` +
+        `🔴 ${bearishOBs.length} bearish OBs ` +
+        `(${stats.bearishRejectedByVolume} by volume, ${stats.bearishRejectedByBalance} by balance)`
       );
       
       const allZones = [...bullishOBs, ...bearishOBs];
@@ -449,7 +497,7 @@ module.exports = async (context) => {
         const zoneIdentifier = `${symbol}-${tf}-${zone.startTime.getTime()}-${zone.type}`;
         
         if (!previousZones.has(zoneIdentifier)) {
-          context.log(`🆕 New zone detected: ${zoneIdentifier}`);
+          context.log(`🆕 New zone detected: ${zoneIdentifier} (Balance: ${zone.balancePercent}%)`);
           const saved = await saveNewZone(zoneIdentifier);
           
           if (saved) {
@@ -464,15 +512,11 @@ module.exports = async (context) => {
               hour12: false,
             });
 
-            const percentage = Math.round(
-              (Math.min(zone.obHighVolume, zone.obLowVolume) / Math.max(zone.obHighVolume, zone.obLowVolume) || 0) * 100
-            );
-
             const status = zone.breaker 
               ? `🟡 已触及 (Breaker) @ ${formatNZTime(zone.breakTime)}`
               : `🟢 有效`;
 
-            // ✅ 增强通知消息：包含成交量确认信息
+            // ✅ 增强通知消息：包含平衡度信息
             const message = `*🔔 新 Order Block 区域警报*\n\n` +
               `*交易对:* ${symbol}\n` +
               `*时间周期:* ${tf}\n` +
@@ -482,16 +526,21 @@ module.exports = async (context) => {
               `*📊 成交量确认 (已通过)*\n` +
               `• 突破K线成交量: ${zone.breakoutVolume.toFixed(0)}\n` +
               `• SMA20基准: ${zone.volumeSMA20.toFixed(0)}\n` +
-              `• 成交量比率: ${zone.volumeRatio}x (>1.2✅)\n` +
-              `• 总成交量: ${zone.obVolume.toFixed(0)} (平衡度: ${percentage}%)\n\n` +
+              `• 成交量比率: ${zone.volumeRatio}x (>1.2✅)\n\n` +
+              `*⚖️ 平衡度分析*\n` +
+              `• 平衡度: ${zone.balancePercent}% ${zone.balanceQuality}\n` +
+              `• 有效范围: 20%-80% ✅\n` +
+              `• 总成交量: ${zone.obVolume.toFixed(0)}\n` +
+              `• 高量部分: ${zone.obHighVolume.toFixed(0)}\n` +
+              `• 低量部分: ${zone.obLowVolume.toFixed(0)}\n\n` +
               `*⏰ 时间信息*\n` +
               `• OB 形成时间: ${formatNZTime(zone.startTime)}\n` +
               `• 突破确认时间: ${formatNZTime(zone.confirmationTime)}\n\n` +
-              `_此区域已通过成交量验证 (Vol > SMA20 × 1.2)_`;
+              `_此区域已通过成交量与平衡度双重验证_`;
 
             newNotifications.push({
               message,
-              subject: `🔔 ${symbol} ${tf} 新 ${zone.type} 区域 [成交量已确认]`,
+              subject: `🔔 ${symbol} ${tf} 新 ${zone.type} 区域 [平衡度: ${zone.balancePercent}%]`,
             });
           }
         }
