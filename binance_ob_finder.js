@@ -3,16 +3,12 @@ const axios = require("axios");
 const nodemailer = require("nodemailer");
 
 // ============================================================================
-// --- PINE SCRIPT LOGIC ALIGNMENT SUMMARY ---
+// --- ENHANCED ORDER BLOCK DETECTION WITH VOLUME CONFIRMATION ---
 //
-// 1.  ✅ Order Block (OB) Identification: Core logic for swing points,
-//      confirmation, candle search, and zone definition is a 1:1 match.
-// 2.  ✅ ATR Calculation: Uses an EMA-based method, matching ta.atr().
-// 3.  ✅ OB Invalidation: Two-stage breaker/invalidation logic is a 1:1 match.
-//      This version correctly identifies and reports "breaker" zones.
-// 4.  ⚠️ Not Implemented: Multi-timeframe analysis (request.security) and
-//      OB zone combination (combineOBsFunc) are complex features specific
-//      to the Pine Script environment and are not included here.
+// ✅ 新增功能：
+// 1. SMA20 成交量计算
+// 2. 突破K线必须满足：Volume > SMA20 × 1.2
+// 3. 不合格的OB直接过滤，不发送通知
 // ============================================================================
 
 // ============================================================================
@@ -91,9 +87,6 @@ async function getKlines(symbol, interval, limit, context) {
 
 /**
  * 计算单根 K 线的真实波幅 (True Range)
- * @param {object} kline 当前 K 线
- * @param {object} prevKline 前一根 K 线
- * @returns {number} 真实波幅
  */
 function calculateTrueRange(kline, prevKline) {
   const high = kline.high;
@@ -108,10 +101,7 @@ function calculateTrueRange(kline, prevKline) {
 }
 
 /**
- * ✅ [关键更新] 计算 ATR，使用 RMA/EMA 方法，与 Pine Script 的 ta.atr() 一致
- * @param {Array<object>} klines K 线数据
- * @param {number} period 周期，默认为 10
- * @returns {number} 当前的 ATR 值
+ * 计算 ATR，使用 RMA/EMA 方法
  */
 function calculateAtrEma(klines, period = 10) {
   if (klines.length < period) return 0;
@@ -119,11 +109,8 @@ function calculateAtrEma(klines, period = 10) {
   const trs = klines.map((k, i) => calculateTrueRange(k, i > 0 ? klines[i - 1] : null));
   
   const alpha = 1 / period; 
-  
-  // 初始化 ATR：计算前 N 个 TR 的简单平均值
   let atr = trs.slice(1, period + 1).reduce((sum, val) => sum + val, 0) / period;
   
-  // 使用 RMA/EMA 公式进行平滑计算
   for (let i = period + 1; i < trs.length; i++) {
     atr = (trs[i] * alpha) + (atr * (1 - alpha));
   }
@@ -132,21 +119,52 @@ function calculateAtrEma(klines, period = 10) {
 }
 
 /**
- * ✅ 完全按照 Pine Script 逻辑实现的 OB 识别
- * @param {Array<object>} klines K 线数据
+ * ✅ [新增] 计算成交量的简单移动平均线 (SMA)
+ * @param {Array<object>} klines K线数据
+ * @param {number} endIndex 当前K线索引
+ * @param {number} period SMA周期，默认20
+ * @returns {number} 成交量SMA值
+ */
+function calculateVolumeSMA(klines, endIndex, period = 20) {
+  if (endIndex < period - 1) return 0;
+  
+  let sum = 0;
+  for (let i = endIndex - period + 1; i <= endIndex; i++) {
+    if (i >= 0 && i < klines.length) {
+      sum += klines[i].volume;
+    }
+  }
+  return sum / period;
+}
+
+/**
+ * ✅ [增强版] Order Block 识别 - 带成交量确认
+ * @param {Array<object>} klines K线数据
  * @param {number} swingLength 摆动点长度
- * @param {string} obEndMethod 失效方式 "Wick" 或 "Close"
- * @param {number} maxATRMult ATR 乘数
- * @returns {{bullishOBs: Array<object>, bearishOBs: Array<object>}}
+ * @param {string} obEndMethod 失效方式
+ * @param {number} maxATRMult ATR乘数
+ * @param {number} volumeMultiplier 成交量乘数（默认1.2）
+ * @param {number} volumeSMAPeriod 成交量SMA周期（默认20）
+ * @returns {{bullishOBs: Array, bearishOBs: Array, stats: object}}
  */
 function findOrderBlocksPineScriptLogic(
   klines,
   swingLength = 10,
   obEndMethod = "Wick",
-  maxATRMult = 3.5
+  maxATRMult = 3.5,
+  volumeMultiplier = 1.2,
+  volumeSMAPeriod = 20
 ) {
   const bullishOBs = [];
   const bearishOBs = [];
+  
+  // 📊 统计信息
+  const stats = {
+    totalBullishSignals: 0,
+    totalBearishSignals: 0,
+    bullishRejectedByVolume: 0,
+    bearishRejectedByVolume: 0,
+  };
   
   let swingType = 0;
   let lastSwingHigh = null;
@@ -157,7 +175,6 @@ function findOrderBlocksPineScriptLogic(
   for (let barIndex = swingLength; barIndex < klines.length; barIndex++) {
     const refIndex = barIndex - swingLength;
     
-    // 计算 ta.highest(len) 和 ta.lowest(len)
     let upper = -Infinity;
     let lower = Infinity;
     
@@ -186,9 +203,19 @@ function findOrderBlocksPineScriptLogic(
     
     const currentCandle = klines[barIndex];
     
-    // ============ 看涨 OB 形成 ============
+    // ============ 🟢 看涨 OB 形成（带成交量确认）============
     if (lastSwingHigh && !lastSwingHigh.crossed && currentCandle.close > lastSwingHigh.high) {
       lastSwingHigh.crossed = true;
+      stats.totalBullishSignals++;
+      
+      // ✅ 成交量确认：突破K线必须满足成交量要求
+      const volumeSMA20 = calculateVolumeSMA(klines, barIndex, volumeSMAPeriod);
+      const volumeThreshold = volumeSMA20 * volumeMultiplier;
+      
+      if (currentCandle.volume <= volumeThreshold) {
+        stats.bullishRejectedByVolume++;
+        continue; // ❌ 成交量不足，忽略此OB
+      }
       
       let boxBtm = barIndex >= 1 ? klines[barIndex - 1].high : currentCandle.high;
       let boxTop = barIndex >= 1 ? klines[barIndex - 1].low : currentCandle.low;
@@ -218,16 +245,37 @@ function findOrderBlocksPineScriptLogic(
       
       if (obSize <= atr * maxATRMult) {
         bullishOBs.unshift({
-          startTime: boxLoc, confirmationTime: currentCandle.timestamp, top: boxTop,
-          bottom: boxBtm, obVolume, obLowVolume, obHighVolume, isValid: true,
-          breaker: false, breakTime: null, type: "Support"
+          startTime: boxLoc,
+          confirmationTime: currentCandle.timestamp,
+          top: boxTop,
+          bottom: boxBtm,
+          obVolume,
+          obLowVolume,
+          obHighVolume,
+          breakoutVolume: currentCandle.volume, // ✅ 新增：突破K线成交量
+          volumeSMA20, // ✅ 新增：当时的SMA20
+          volumeRatio: (currentCandle.volume / volumeSMA20).toFixed(2), // ✅ 新增：成交量比率
+          isValid: true,
+          breaker: false,
+          breakTime: null,
+          type: "Support"
         });
       }
     }
     
-    // ============ 看跌 OB 形成 ============
+    // ============ 🔴 看跌 OB 形成（带成交量确认）============
     if (lastSwingLow && !lastSwingLow.crossed && currentCandle.close < lastSwingLow.low) {
       lastSwingLow.crossed = true;
+      stats.totalBearishSignals++;
+      
+      // ✅ 成交量确认：突破K线必须满足成交量要求
+      const volumeSMA20 = calculateVolumeSMA(klines, barIndex, volumeSMAPeriod);
+      const volumeThreshold = volumeSMA20 * volumeMultiplier;
+      
+      if (currentCandle.volume <= volumeThreshold) {
+        stats.bearishRejectedByVolume++;
+        continue; // ❌ 成交量不足，忽略此OB
+      }
       
       let boxBtm = barIndex >= 1 ? klines[barIndex - 1].low : currentCandle.low;
       let boxTop = barIndex >= 1 ? klines[barIndex - 1].high : currentCandle.high;
@@ -257,14 +305,25 @@ function findOrderBlocksPineScriptLogic(
       
       if (obSize <= atr * maxATRMult) {
         bearishOBs.unshift({
-          startTime: boxLoc, confirmationTime: currentCandle.timestamp, top: boxTop,
-          bottom: boxBtm, obVolume, obLowVolume, obHighVolume, isValid: true,
-          breaker: false, breakTime: null, type: "Resistance"
+          startTime: boxLoc,
+          confirmationTime: currentCandle.timestamp,
+          top: boxTop,
+          bottom: boxBtm,
+          obVolume,
+          obLowVolume,
+          obHighVolume,
+          breakoutVolume: currentCandle.volume, // ✅ 新增
+          volumeSMA20, // ✅ 新增
+          volumeRatio: (currentCandle.volume / volumeSMA20).toFixed(2), // ✅ 新增
+          isValid: true,
+          breaker: false,
+          breakTime: null,
+          type: "Resistance"
         });
       }
     }
     
-    // ============ OB 失效检测 (对所有历史 OB 进行) ============
+    // ============ OB 失效检测 ============
     for (let ob of bullishOBs) {
       if (!ob.breaker) {
         const testValue = obEndMethod === "Wick" ? currentCandle.low : Math.min(currentCandle.open, currentCandle.close);
@@ -292,7 +351,8 @@ function findOrderBlocksPineScriptLogic(
   
   return {
     bullishOBs: bullishOBs.filter(ob => ob.isValid),
-    bearishOBs: bearishOBs.filter(ob => ob.isValid)
+    bearishOBs: bearishOBs.filter(ob => ob.isValid),
+    stats // ✅ 返回过滤统计信息
   };
 }
 
@@ -306,9 +366,13 @@ module.exports = async (context) => {
     SYMBOLS: ["BTCUSDT", "ETHUSDT"],
     TIMEZONES: ["1h", "4h", "1d"],
     SWING_LENGTH: 10,
-    OB_END_METHOD: "Wick", // "Wick" 或 "Close"
+    OB_END_METHOD: "Wick",
     MAX_ATR_MULT: 3.5,
     KLINE_LIMIT: 1000,
+    
+    // ✅ 新增：成交量过滤参数
+    VOLUME_MULTIPLIER: 1.2, // 突破K线成交量必须 > SMA20 × 1.2
+    VOLUME_SMA_PERIOD: 20,  // 成交量SMA周期
 
     ENABLE_TELEGRAM: true,
     TELEGRAM_BOT_TOKEN: "7607543807:AAFcNXDZE_ctPhTQVc60vnX69o0zPjzsLb0",
@@ -363,15 +427,25 @@ module.exports = async (context) => {
         continue;
       }
 
-      const { bullishOBs, bearishOBs } = findOrderBlocksPineScriptLogic(
-        klines, CONFIG.SWING_LENGTH, CONFIG.OB_END_METHOD, CONFIG.MAX_ATR_MULT
+      const { bullishOBs, bearishOBs, stats } = findOrderBlocksPineScriptLogic(
+        klines,
+        CONFIG.SWING_LENGTH,
+        CONFIG.OB_END_METHOD,
+        CONFIG.MAX_ATR_MULT,
+        CONFIG.VOLUME_MULTIPLIER,
+        CONFIG.VOLUME_SMA_PERIOD
       );
       
-      context.log(`${symbol} ${tf}: Found ${bullishOBs.length} 🟢 bullish | ${bearishOBs.length} 🔴 bearish OBs`);
+      // ✅ 增强日志：显示过滤统计
+      context.log(
+        `${symbol} ${tf}: ` +
+        `🟢 ${bullishOBs.length} bullish OBs (${stats.bullishRejectedByVolume} rejected by volume) | ` +
+        `🔴 ${bearishOBs.length} bearish OBs (${stats.bearishRejectedByVolume} rejected by volume)`
+      );
       
       const allZones = [...bullishOBs, ...bearishOBs];
 
-      for (const zone of allZones.slice(0, 5)) { // 只检查最新的5个OB
+      for (const zone of allZones.slice(0, 5)) {
         const zoneIdentifier = `${symbol}-${tf}-${zone.startTime.getTime()}-${zone.type}`;
         
         if (!previousZones.has(zoneIdentifier)) {
@@ -380,8 +454,14 @@ module.exports = async (context) => {
           
           if (saved) {
             const formatNZTime = (date) => date.toLocaleString("en-NZ", {
-              timeZone: "Pacific/Auckland", year: "numeric", month: "2-digit", day: "2-digit",
-              hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+              timeZone: "Pacific/Auckland",
+              year: "numeric",
+              month: "2-digit",
+              day: "2-digit",
+              hour: "2-digit",
+              minute: "2-digit",
+              second: "2-digit",
+              hour12: false,
             });
 
             const percentage = Math.round(
@@ -392,20 +472,26 @@ module.exports = async (context) => {
               ? `🟡 已触及 (Breaker) @ ${formatNZTime(zone.breakTime)}`
               : `🟢 有效`;
 
+            // ✅ 增强通知消息：包含成交量确认信息
             const message = `*🔔 新 Order Block 区域警报*\n\n` +
               `*交易对:* ${symbol}\n` +
               `*时间周期:* ${tf}\n` +
               `*类型:* ${zone.type === "Support" ? "🟢 看涨支撑区" : "🔴 看跌阻力区"}\n` +
               `*状态:* ${status}\n` +
-              `*价格区间:* ${zone.bottom.toFixed(zone.bottom > 100 ? 2 : 4)} - ${zone.top.toFixed(zone.top > 100 ? 2 : 4)}\n` +
-              `*总成交量:* ${zone.obVolume.toFixed(0)} (平衡度: ${percentage}%)\n` +
-              `*OB 形成时间:* ${formatNZTime(zone.startTime)}\n` +
-              `*突破确认时间:* ${formatNZTime(zone.confirmationTime)}\n\n` +
-              `_此区域基于 Pine Script 逻辑识别_`;
+              `*价格区间:* ${zone.bottom.toFixed(zone.bottom > 100 ? 2 : 4)} - ${zone.top.toFixed(zone.top > 100 ? 2 : 4)}\n\n` +
+              `*📊 成交量确认 (已通过)*\n` +
+              `• 突破K线成交量: ${zone.breakoutVolume.toFixed(0)}\n` +
+              `• SMA20基准: ${zone.volumeSMA20.toFixed(0)}\n` +
+              `• 成交量比率: ${zone.volumeRatio}x (>1.2✅)\n` +
+              `• 总成交量: ${zone.obVolume.toFixed(0)} (平衡度: ${percentage}%)\n\n` +
+              `*⏰ 时间信息*\n` +
+              `• OB 形成时间: ${formatNZTime(zone.startTime)}\n` +
+              `• 突破确认时间: ${formatNZTime(zone.confirmationTime)}\n\n` +
+              `_此区域已通过成交量验证 (Vol > SMA20 × 1.2)_`;
 
             newNotifications.push({
               message,
-              subject: `🔔 ${symbol} ${tf} 新 ${zone.type} 区域`,
+              subject: `🔔 ${symbol} ${tf} 新 ${zone.type} 区域 [成交量已确认]`,
             });
           }
         }
