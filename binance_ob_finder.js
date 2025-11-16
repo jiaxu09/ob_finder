@@ -9,6 +9,7 @@ const nodemailer = require("nodemailer");
 // 1. SMA20 成交量确认（Volume > SMA20 × 1.2）
 // 2. 平衡度计算与过滤（仅保留 20% - 80% 之间）
 // 3. 多维度风险评估与通知
+// 4. 交易时段识别与可靠性标记（新增）
 // ============================================================================
 
 // ============================================================================
@@ -79,6 +80,78 @@ async function getKlines(symbol, interval, limit, context) {
     context.error(`Failed to get klines for ${symbol} ${interval}:`, e.message);
     return null;
   }
+}
+
+// ============================================================================
+// --- 🆕 交易时段识别函数 ---
+// ============================================================================
+
+/**
+ * 判断给定时间是否为周末
+ * @param {Date} date - 要检查的时间
+ * @returns {boolean} 是否为周末
+ */
+function isWeekend(date) {
+  const day = date.getUTCDay();
+  return day === 0 || day === 6; // 0=Sunday, 6=Saturday
+}
+
+/**
+ * 获取给定时间的交易时段
+ * @param {Date} date - 要检查的时间
+ * @returns {Object} { session: string, emoji: string, reliable: boolean, description: string }
+ */
+function getMarketSession(date) {
+  const hour = date.getUTCHours();
+  
+  // 检查是否为周末
+  if (isWeekend(date)) {
+    return {
+      session: "周末",
+      emoji: "⛔",
+      reliable: false,
+      description: "周末低流动性时段"
+    };
+  }
+  
+  // 判断交易时段（UTC 时间）
+  const sessions = [];
+  
+  // 亚洲时段: 00:00-09:00 UTC (东京 09:00-18:00 JST, 香港 08:00-17:00 HKT)
+  if (hour >= 0 && hour < 9) {
+    sessions.push("亚洲");
+  }
+  
+  // 欧洲时段: 07:00-16:00 UTC (伦敦 08:00-17:00 BST/GMT)
+  if (hour >= 7 && hour < 16) {
+    sessions.push("欧洲");
+  }
+  
+  // 美股时段: 13:30-20:00 UTC (纽约 09:30-16:00 EST/EDT)
+  if ((hour === 13 && date.getUTCMinutes() >= 30) || (hour >= 14 && hour < 20)) {
+    sessions.push("美股");
+  }
+  
+  // 如果没有匹配任何主要时段，标记为低流动性
+  if (sessions.length === 0) {
+    return {
+      session: "非交易时段",
+      emoji: "⚠️",
+      reliable: false,
+      description: "低流动性时段"
+    };
+  }
+  
+  // 如果有重叠时段（高流动性），显示所有相关时段
+  const sessionName = sessions.join(" + ");
+  const emoji = sessions.length > 1 ? "🔥" : "✅";
+  
+  return {
+    session: sessionName,
+    emoji: emoji,
+    reliable: true,
+    description: sessions.length > 1 ? "多市场重叠 - 高流动性" : "单一市场时段"
+  };
 }
 
 // ============================================================================
@@ -516,7 +589,13 @@ module.exports = async (context) => {
               ? `🟡 已触及 (Breaker) @ ${formatNZTime(zone.breakTime)}`
               : `🟢 有效`;
 
-            // ✅ 增强通知消息：包含平衡度信息
+            // ✅ 🆕 获取交易时段信息
+            const sessionInfo = getMarketSession(zone.confirmationTime);
+            const reliabilityWarning = !sessionInfo.reliable 
+              ? `\n⚠️ *注意: ${sessionInfo.description}，信号可靠性较低*` 
+              : '';
+
+            // ✅ 增强通知消息：包含平衡度信息 + 交易时段信息
             const message = `*🔔 新 Order Block 区域警报*\n\n` +
               `*交易对:* ${symbol}\n` +
               `*时间周期:* ${tf}\n` +
@@ -533,14 +612,16 @@ module.exports = async (context) => {
               `• 总成交量: ${zone.obVolume.toFixed(0)}\n` +
               `• 高量部分: ${zone.obHighVolume.toFixed(0)}\n` +
               `• 低量部分: ${zone.obLowVolume.toFixed(0)}\n\n` +
-              `*⏰ 时间信息*\n` +
+              `*⏰ 时间与时段信息*\n` +
               `• OB 形成时间: ${formatNZTime(zone.startTime)}\n` +
-              `• 突破确认时间: ${formatNZTime(zone.confirmationTime)}\n\n` +
+              `• 突破确认时间: ${formatNZTime(zone.confirmationTime)}\n` +
+              `• 确认时段: ${sessionInfo.emoji} *${sessionInfo.session}*\n` +
+              `• 时段描述: ${sessionInfo.description}${reliabilityWarning}\n\n` +
               `_此区域已通过成交量与平衡度双重验证_`;
 
             newNotifications.push({
               message,
-              subject: `🔔 ${symbol} ${tf} 新 ${zone.type} 区域 [平衡度: ${zone.balancePercent}%]`,
+              subject: `🔔 ${symbol} ${tf} 新 ${zone.type} 区域 [平衡度: ${zone.balancePercent}%] [${sessionInfo.session}]`,
             });
           }
         }
