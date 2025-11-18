@@ -661,7 +661,7 @@ module.exports = async (context) => {
     TELEGRAM_CHAT_ID: "7510264240",
 
     ENABLE_EMAIL: true,
-    EMAIL_RECIPIENT: "jiaxu99.w@gmail.com",
+    EMAIL_RECIPIENT: "jiaxu09@gmail.com",
     EMAIL_CONFIG: {
       service: "gmail",
       auth: { user: "jiaxu99.w@gmail.com", pass: "hqmv qwbm qpik juiq" },
