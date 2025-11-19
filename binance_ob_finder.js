@@ -3,68 +3,57 @@ const axios = require("axios");
 const nodemailer = require("nodemailer");
 
 // ============================================================================
-// --- ENHANCED ORDER BLOCK DETECTION WITH BREAKOUT CANDLE PATTERN ANALYSIS ---
-//
-// ✅ 核心功能：
-// 1. SMA20 成交量确认（Volume > SMA20 × 1.2）
-// 2. 平衡度计算与过滤（仅保留 20% - 80% 之间）
-// 3. 🆕 突破K线形态分析与强度评估
-// 4. 交易时段识别与可靠性标记
-// 5. 多维度风险评估与通知
+// --- 🆕 配置区域 ---
 // ============================================================================
+const RUNTIME_CONFIG = {
+  // 运行间隔（分钟）- 用于判断是否为新zone
+  EXECUTION_INTERVAL_MINUTES: 5,
+  
+  // 时间缓冲（分钟）- 考虑到延迟，检查过去10分钟的数据
+  TIME_BUFFER_MINUTES: 10,
+  
+  // 数据库优化
+  DB_DAYS_LOOKBACK: 7,        // 只读取最近7天的数据
+  DB_MAX_RECORDS: 200,        // 最多读取200条记录
+};
 
 // ============================================================================
-// --- 🆕 突破K线形态分析模块 ---
+// --- 突破K线形态分析模块（与原代码完全一致）---
 // ============================================================================
 
-/**
- * 🆕 分析突破K线的形态特征
- * @param {Object} breakoutCandle - 突破确认的K线
- * @param {string} obType - Order Block类型 ("Support" 或 "Resistance")
- * @returns {Object} 形态分析结果
- */
 function analyzeBreakoutCandlePattern(breakoutCandle, obType) {
   const { open, high, low, close } = breakoutCandle;
   
-  // 1. 计算K线各部分尺寸
-  const totalRange = high - low; // 总波动范围（高-低）
-  const body = Math.abs(close - open); // 实体大小
+  const totalRange = high - low;
+  const body = Math.abs(close - open);
   const bodyPercent = totalRange > 0 ? (body / totalRange) * 100 : 0;
   
-  // 2. 判断K线方向
   const isBullish = close > open;
   
-  // 3. 计算上下影线
   const upperWick = isBullish ? high - close : high - open;
   const lowerWick = isBullish ? open - low : close - low;
   const upperWickPercent = totalRange > 0 ? (upperWick / totalRange) * 100 : 0;
   const lowerWickPercent = totalRange > 0 ? (lowerWick / totalRange) * 100 : 0;
   
-  // 4. 计算价格变动百分比
   const priceChangePercent = open > 0 ? ((close - open) / open) * 100 : 0;
   
-  // 5. 判断K线形态类型
   let candleType = "";
   let candleEmoji = "";
-  let strengthScore = 0; // 0-100的强度评分
+  let strengthScore = 0;
   
   if (bodyPercent >= 70) {
-    // 强势光头光脚K线（Marubozu）
     candleType = isBullish ? "强势阳线 (Marubozu)" : "强势阴线 (Marubozu)";
     candleEmoji = isBullish ? "🟢💪" : "🔴💪";
     strengthScore = 90;
   } else if (bodyPercent >= 50) {
-    // 标准实体K线
     candleType = isBullish ? "标准阳线" : "标准阴线";
     candleEmoji = isBullish ? "🟩" : "🟥";
     strengthScore = 70;
   } else if (bodyPercent >= 30) {
-    // 中等实体K线
     candleType = isBullish ? "小阳线" : "小阴线";
     candleEmoji = isBullish ? "⬆️" : "⬇️";
     strengthScore = 50;
   } else if (bodyPercent <= 10) {
-    // 十字星或特殊形态
     if (upperWickPercent > 40 && lowerWickPercent < 20) {
       candleType = "流星线/上吊线 (Shooting Star)";
       candleEmoji = "☄️";
@@ -79,7 +68,6 @@ function analyzeBreakoutCandlePattern(breakoutCandle, obType) {
       strengthScore = 20;
     }
   } else {
-    // 其他常见形态
     if (isBullish && lowerWickPercent > 30 && upperWickPercent < 15) {
       candleType = "锤子线";
       candleEmoji = "🔨";
@@ -95,30 +83,25 @@ function analyzeBreakoutCandlePattern(breakoutCandle, obType) {
     }
   }
   
-  // 6. 综合评估突破强度（考虑OB类型匹配度）
   let finalScore = strengthScore;
   
-  // ✅ 关键逻辑：突破方向与OB类型的一致性
   const isDirectionMatched = 
-    (obType === "Support" && isBullish) ||  // 看涨OB应该由阳线突破
-    (obType === "Resistance" && !isBullish); // 看跌OB应该由阴线突破
+    (obType === "Support" && isBullish) ||
+    (obType === "Resistance" && !isBullish);
   
   if (!isDirectionMatched) {
-    finalScore -= 30; // ❌ 方向不匹配，严重减分
+    finalScore -= 30;
   }
   
-  // 实体与影线比例优化
   if (bodyPercent >= 60 && Math.max(upperWickPercent, lowerWickPercent) < 20) {
-    finalScore += 10; // ✅ 大实体小影线，决断力强
+    finalScore += 10;
   }
   if (bodyPercent < 20 || Math.max(upperWickPercent, lowerWickPercent) > 50) {
-    finalScore -= 15; // ❌ 小实体或长影线，犹豫形态
+    finalScore -= 15;
   }
   
-  // 确保评分在 0-100 范围内
   finalScore = Math.min(100, Math.max(0, finalScore));
   
-  // 7. 确定突破强度等级
   let breakoutStrength = "";
   let breakoutEmoji = "";
   let recommendation = "";
@@ -146,46 +129,28 @@ function analyzeBreakoutCandlePattern(breakoutCandle, obType) {
   }
   
   return {
-    // 基础数据
     isBullish,
     direction: isBullish ? "看涨" : "看跌",
     totalRange: totalRange.toFixed(8),
     body: body.toFixed(8),
     bodyPercent: bodyPercent.toFixed(1),
-    
-    // 影线数据
     upperWick: upperWick.toFixed(8),
     lowerWick: lowerWick.toFixed(8),
     upperWickPercent: upperWickPercent.toFixed(1),
     lowerWickPercent: lowerWickPercent.toFixed(1),
-    
-    // 价格变动
     priceChangePercent: priceChangePercent.toFixed(2),
-    
-    // 形态识别
     candleType,
     candleEmoji,
-    
-    // 强度评估
     strengthScore: finalScore,
     breakoutStrength,
     breakoutEmoji,
-    
-    // 方向匹配
     isDirectionMatched,
     directionMatchEmoji: isDirectionMatched ? "✅" : "⚠️",
-    
-    // 建议
     recommendation,
-    
-    // 详细描述
     description: generateCandleDescription(bodyPercent, upperWickPercent, lowerWickPercent, isBullish)
   };
 }
 
-/**
- * 🆕 生成K线形态的文字描述
- */
 function generateCandleDescription(bodyPercent, upperWickPercent, lowerWickPercent, isBullish) {
   const direction = isBullish ? "上涨" : "下跌";
   
@@ -216,7 +181,7 @@ function generateCandleDescription(bodyPercent, upperWickPercent, lowerWickPerce
 }
 
 // ============================================================================
-// --- 辅助函数 ---
+// --- 辅助函数（与原代码完全一致）---
 // ============================================================================
 
 async function sendTelegramNotification(config, message, context) {
@@ -285,10 +250,6 @@ async function getKlines(symbol, interval, limit, context) {
   }
 }
 
-// ============================================================================
-// --- 交易时段识别函数 ---
-// ============================================================================
-
 function isWeekend(date) {
   const day = date.getUTCDay();
   return day === 0 || day === 6;
@@ -341,7 +302,7 @@ function getMarketSession(date) {
 }
 
 // ============================================================================
-// --- Order Block 技术指标计算 ---
+// --- Order Block 技术指标计算（与原代码完全一致）---
 // ============================================================================
 
 function calculateTrueRange(kline, prevKline) {
@@ -399,9 +360,10 @@ function evaluateBalanceQuality(balance) {
   return "🔴 较差";
 }
 
-/**
- * ✅ [增强版] Order Block 识别 - 带成交量确认、平衡度过滤、突破K线形态分析
- */
+// ============================================================================
+// --- Order Block 识别（与原代码完全一致）---
+// ============================================================================
+
 function findOrderBlocksPineScriptLogic(
   klines,
   swingLength = 10,
@@ -459,7 +421,6 @@ function findOrderBlocksPineScriptLogic(
     
     const currentCandle = klines[barIndex];
     
-    // ============ 🟢 看涨 OB 形成 ============
     if (lastSwingHigh && !lastSwingHigh.crossed && currentCandle.close > lastSwingHigh.high) {
       lastSwingHigh.crossed = true;
       stats.totalBullishSignals++;
@@ -506,7 +467,6 @@ function findOrderBlocksPineScriptLogic(
       const obSize = Math.abs(boxTop - boxBtm);
       
       if (obSize <= atr * maxATRMult) {
-        // 🆕 分析突破K线形态
         const breakoutPattern = analyzeBreakoutCandlePattern(currentCandle, "Support");
         
         bullishOBs.unshift({
@@ -522,7 +482,7 @@ function findOrderBlocksPineScriptLogic(
           volumeRatio: (currentCandle.volume / volumeSMA20).toFixed(2),
           balancePercent,
           balanceQuality: evaluateBalanceQuality(balancePercent),
-          breakoutPattern,  // 🆕 添加突破K线形态数据
+          breakoutPattern,
           isValid: true,
           breaker: false,
           breakTime: null,
@@ -531,7 +491,6 @@ function findOrderBlocksPineScriptLogic(
       }
     }
     
-    // ============ 🔴 看跌 OB 形成 ============
     if (lastSwingLow && !lastSwingLow.crossed && currentCandle.close < lastSwingLow.low) {
       lastSwingLow.crossed = true;
       stats.totalBearishSignals++;
@@ -578,7 +537,6 @@ function findOrderBlocksPineScriptLogic(
       const obSize = Math.abs(boxTop - boxBtm);
       
       if (obSize <= atr * maxATRMult) {
-        // 🆕 分析突破K线形态
         const breakoutPattern = analyzeBreakoutCandlePattern(currentCandle, "Resistance");
         
         bearishOBs.unshift({
@@ -594,7 +552,7 @@ function findOrderBlocksPineScriptLogic(
           volumeRatio: (currentCandle.volume / volumeSMA20).toFixed(2),
           balancePercent,
           balanceQuality: evaluateBalanceQuality(balancePercent),
-          breakoutPattern,  // 🆕 添加突破K线形态数据
+          breakoutPattern,
           isValid: true,
           breaker: false,
           breakTime: null,
@@ -603,7 +561,6 @@ function findOrderBlocksPineScriptLogic(
       }
     }
     
-    // ============ OB 失效检测 ============
     for (let ob of bullishOBs) {
       if (!ob.breaker) {
         const testValue = obEndMethod === "Wick" ? currentCandle.low : Math.min(currentCandle.open, currentCandle.close);
@@ -637,10 +594,191 @@ function findOrderBlocksPineScriptLogic(
 }
 
 // ============================================================================
+// --- 🆕 方案B：潜在新zone预检测 ---
+// ============================================================================
+
+/**
+ * 🆕 检测是否有潜在的新zone（不读数据库）
+ * 原理：只检查最近10分钟内形成的OB
+ */
+function detectPotentialNewZones(allZonesData, context) {
+  const now = new Date();
+  const timeThreshold = new Date(now.getTime() - RUNTIME_CONFIG.TIME_BUFFER_MINUTES * 60 * 1000);
+  
+  const potentialNewZones = [];
+  
+  for (const { symbol, timeframe, zones } of allZonesData) {
+    const allZones = [...zones.bullishOBs, ...zones.bearishOBs];
+    
+    // 🔑 关键过滤：只保留最近10分钟内确认的OB
+    const recentZones = allZones.filter(zone => 
+      zone.confirmationTime >= timeThreshold
+    );
+    
+    if (recentZones.length > 0) {
+      context.log(
+        `🆕 ${symbol} ${timeframe}: Found ${recentZones.length} potential new zones ` +
+        `(confirmed after ${timeThreshold.toISOString()})`
+      );
+      
+      for (const zone of recentZones) {
+        const zoneIdentifier = `${symbol}-${timeframe}-${zone.startTime.getTime()}-${zone.type}`;
+        potentialNewZones.push({
+          identifier: zoneIdentifier,
+          symbol,
+          timeframe,
+          zone
+        });
+      }
+    }
+  }
+  
+  return potentialNewZones;
+}
+
+// ============================================================================
+// --- 🆕 优化后的数据库操作 ---
+// ============================================================================
+
+/**
+ * 🆕 只读取最近7天的记录
+ */
+async function loadRecentZones(databases, DB_ID, COLLECTION_ID, context) {
+  try {
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - RUNTIME_CONFIG.DB_DAYS_LOOKBACK);
+    const timestamp = cutoffDate.toISOString();
+    
+    const response = await databases.listDocuments(
+      DB_ID, 
+      COLLECTION_ID, 
+      [
+        Query.greaterThan('$createdAt', timestamp),
+        Query.limit(RUNTIME_CONFIG.DB_MAX_RECORDS),
+        Query.orderDesc('$createdAt')
+      ]
+    );
+    
+    context.log(`✅ Loaded ${response.documents.length} zones from DB (last ${RUNTIME_CONFIG.DB_DAYS_LOOKBACK} days)`);
+    return new Set(response.documents.map((doc) => doc.zoneIdentifier));
+  } catch (e) {
+    context.error("Failed to load recent zones from Appwrite DB:", e);
+    return new Set();
+  }
+}
+
+/**
+ * 🆕 批量保存新zones（并行写入）
+ */
+async function saveNewZonesBatch(databases, DB_ID, COLLECTION_ID, newZones, context) {
+  if (newZones.length === 0) return 0;
+  
+  try {
+    const promises = newZones.map(zoneId => 
+      databases.createDocument(DB_ID, COLLECTION_ID, ID.unique(), { 
+        zoneIdentifier: zoneId 
+      })
+      .catch(e => {
+        if (e.code !== 409) {
+          context.error(`Failed to save zone ${zoneId}:`, e.message);
+        }
+        return null;
+      })
+    );
+    
+    const results = await Promise.all(promises);
+    const savedCount = results.filter(r => r !== null).length;
+    
+    if (savedCount > 0) {
+      context.log(`✅ Batch saved ${savedCount} new zones to DB`);
+    }
+    
+    return savedCount;
+  } catch (e) {
+    context.error("Failed to batch save zones:", e);
+    return 0;
+  }
+}
+
+// ============================================================================
+// --- 🆕 生成通知消息 ---
+// ============================================================================
+
+function generateNotificationMessage(symbol, timeframe, zone, CONFIG) {
+  const formatNZTime = (date) => date.toLocaleString("en-NZ", {
+    timeZone: "Pacific/Auckland",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+
+  const status = zone.breaker 
+    ? `🟡 已触及 (Breaker) @ ${formatNZTime(zone.breakTime)}`
+    : `🟢 有效`;
+
+  const sessionInfo = getMarketSession(zone.confirmationTime);
+  const reliabilityWarning = !sessionInfo.reliable 
+    ? `\n⚠️ *注意: ${sessionInfo.description}，信号可靠性较低*` 
+    : '';
+
+  const bp = zone.breakoutPattern;
+  const patternWarning = !bp.isDirectionMatched 
+    ? `\n⚠️ *警告: 突破K线方向与OB类型不匹配，谨慎对待*`
+    : '';
+
+  const message = `*🔔 新 Order Block 区域警报*\n\n` +
+    `*交易对:* ${symbol}\n` +
+    `*时间周期:* ${timeframe}\n` +
+    `*类型:* ${zone.type === "Support" ? "🟢 看涨支撑区" : "🔴 看跌阻力区"}\n` +
+    `*状态:* ${status}\n` +
+    `*价格区间:* ${zone.bottom.toFixed(zone.bottom > 100 ? 2 : 4)} - ${zone.top.toFixed(zone.top > 100 ? 2 : 4)}\n\n` +
+    
+    `*📊 成交量确认 (已通过)*\n` +
+    `• 突破K线成交量: ${zone.breakoutVolume.toFixed(0)}\n` +
+    `• SMA20基准: ${zone.volumeSMA20.toFixed(0)}\n` +
+    `• 成交量比率: ${zone.volumeRatio}x (>1.2✅)\n\n` +
+    
+    `*⚖️ 平衡度分析*\n` +
+    `• 平衡度: ${zone.balancePercent}% ${zone.balanceQuality}\n` +
+    `• 有效范围: 20%-80% ✅\n` +
+    `• 总成交量: ${zone.obVolume.toFixed(0)}\n` +
+    `• 高量部分: ${zone.obHighVolume.toFixed(0)}\n` +
+    `• 低量部分: ${zone.obLowVolume.toFixed(0)}\n\n` +
+    
+    `*🕯️ 突破K线形态分析*\n` +
+    `• 形态类型: ${bp.candleEmoji} ${bp.candleType}\n` +
+    `• K线方向: ${bp.direction} ${bp.directionMatchEmoji}\n` +
+    `• 突破强度: ${bp.breakoutEmoji} *${bp.breakoutStrength}* (${bp.strengthScore}/100)\n` +
+    `• 价格变动: ${bp.priceChangePercent}%\n` +
+    `• 实体占比: ${bp.bodyPercent}% (总波动: ${bp.totalRange})\n` +
+    `• 上影线: ${bp.upperWickPercent}%\n` +
+    `• 下影线: ${bp.lowerWickPercent}%\n` +
+    `• 形态描述: ${bp.description}\n` +
+    `• *建议: ${bp.recommendation}*${patternWarning}\n\n` +
+    
+    `*⏰ 时间与时段信息*\n` +
+    `• OB 形成时间: ${formatNZTime(zone.startTime)}\n` +
+    `• 突破确认时间: ${formatNZTime(zone.confirmationTime)}\n` +
+    `• 确认时段: ${sessionInfo.emoji} *${sessionInfo.session}*\n` +
+    `• 时段描述: ${sessionInfo.description}${reliabilityWarning}\n\n` +
+    
+    `_此区域已通过成交量、平衡度与K线形态三重验证_`;
+
+  const subject = `🔔 ${symbol} ${timeframe} 新${zone.type}区域 [${bp.breakoutStrength}突破] [平衡度${zone.balancePercent}%] [${sessionInfo.session}]`;
+
+  return { message, subject };
+}
+
+// ============================================================================
 // --- Appwrite Function Entrypoint ---
 // ============================================================================
 module.exports = async (context) => {
-  context.log("🚀 Function execution started...");
+  const executionStart = Date.now();
+  context.log("🚀 Function execution started (Optimized v2.0 with Pre-check)...");
 
   const CONFIG = {
     SYMBOLS: ["BTCUSDT", "ETHUSDT"],
@@ -677,31 +815,16 @@ module.exports = async (context) => {
   const DB_ID = "68f5a3fa001774a5ab3d";
   const COLLECTION_ID = "seen_zones";
 
-  async function loadPreviousZones() {
-    try {
-      const response = await databases.listDocuments(DB_ID, COLLECTION_ID, [ Query.limit(5000) ]);
-      return new Set(response.documents.map((doc) => doc.zoneIdentifier));
-    } catch (e) {
-      context.error("Failed to load previous zones from Appwrite DB:", e);
-      return new Set();
-    }
-  }
-
-  async function saveNewZone(zoneIdentifier) {
-    try {
-      await databases.createDocument(DB_ID, COLLECTION_ID, ID.unique(), { zoneIdentifier });
-      return true;
-    } catch (e) {
-      if (e.code !== 409) context.error(`Failed to save new zone ID "${zoneIdentifier}":`, e);
-      return false;
-    }
-  }
-
-  async function analyzeSymbol(symbol, context) {
-    context.log(`\n📊 Analyzing ${symbol}...`);
-    const previousZones = await loadPreviousZones();
-    const newNotifications = [];
-
+  // ============================================================================
+  // 🆕 步骤1：先分析所有symbols，收集所有OB数据（不读数据库）
+  // ============================================================================
+  
+  context.log("\n📊 Step 1: Analyzing all symbols and timeframes...");
+  const allZonesData = [];
+  
+  for (const symbol of CONFIG.SYMBOLS) {
+    context.log(`\n--- Analyzing ${symbol} ---`);
+    
     for (const tf of CONFIG.TIMEZONES) {
       const klines = await getKlines(symbol, tf, CONFIG.KLINE_LIMIT, context);
       if (!klines || klines.length <= CONFIG.SWING_LENGTH) {
@@ -709,7 +832,7 @@ module.exports = async (context) => {
         continue;
       }
 
-      const { bullishOBs, bearishOBs, stats } = findOrderBlocksPineScriptLogic(
+      const result = findOrderBlocksPineScriptLogic(
         klines,
         CONFIG.SWING_LENGTH,
         CONFIG.OB_END_METHOD,
@@ -722,120 +845,127 @@ module.exports = async (context) => {
       
       context.log(
         `${symbol} ${tf}: ` +
-        `🟢 ${bullishOBs.length} bullish OBs ` +
-        `(${stats.bullishRejectedByVolume} by volume, ${stats.bullishRejectedByBalance} by balance) | ` +
-        `🔴 ${bearishOBs.length} bearish OBs ` +
-        `(${stats.bearishRejectedByVolume} by volume, ${stats.bearishRejectedByBalance} by balance)`
+        `🟢 ${result.bullishOBs.length} bullish | ` +
+        `🔴 ${result.bearishOBs.length} bearish ` +
+        `(filtered: Vol ${result.stats.bullishRejectedByVolume + result.stats.bearishRejectedByVolume}, ` +
+        `Bal ${result.stats.bullishRejectedByBalance + result.stats.bearishRejectedByBalance})`
       );
       
-      const allZones = [...bullishOBs, ...bearishOBs];
-
-      for (const zone of allZones.slice(0, 5)) {
-        const zoneIdentifier = `${symbol}-${tf}-${zone.startTime.getTime()}-${zone.type}`;
-        
-        if (!previousZones.has(zoneIdentifier)) {
-          context.log(`🆕 New zone detected: ${zoneIdentifier} (Balance: ${zone.balancePercent}%)`);
-          const saved = await saveNewZone(zoneIdentifier);
-          
-          if (saved) {
-            const formatNZTime = (date) => date.toLocaleString("en-NZ", {
-              timeZone: "Pacific/Auckland",
-              year: "numeric",
-              month: "2-digit",
-              day: "2-digit",
-              hour: "2-digit",
-              minute: "2-digit",
-              second: "2-digit",
-              hour12: false,
-            });
-
-            const status = zone.breaker 
-              ? `🟡 已触及 (Breaker) @ ${formatNZTime(zone.breakTime)}`
-              : `🟢 有效`;
-
-            const sessionInfo = getMarketSession(zone.confirmationTime);
-            const reliabilityWarning = !sessionInfo.reliable 
-              ? `\n⚠️ *注意: ${sessionInfo.description}，信号可靠性较低*` 
-              : '';
-
-            // 🆕 突破K线形态信息
-            const bp = zone.breakoutPattern;
-            const patternWarning = !bp.isDirectionMatched 
-              ? `\n⚠️ *警告: 突破K线方向与OB类型不匹配，谨慎对待*`
-              : '';
-
-            // ✅ 增强通知消息：包含完整的突破K线形态分析
-            const message = `*🔔 新 Order Block 区域警报*\n\n` +
-              `*交易对:* ${symbol}\n` +
-              `*时间周期:* ${tf}\n` +
-              `*类型:* ${zone.type === "Support" ? "🟢 看涨支撑区" : "🔴 看跌阻力区"}\n` +
-              `*状态:* ${status}\n` +
-              `*价格区间:* ${zone.bottom.toFixed(zone.bottom > 100 ? 2 : 4)} - ${zone.top.toFixed(zone.top > 100 ? 2 : 4)}\n\n` +
-              
-              `*📊 成交量确认 (已通过)*\n` +
-              `• 突破K线成交量: ${zone.breakoutVolume.toFixed(0)}\n` +
-              `• SMA20基准: ${zone.volumeSMA20.toFixed(0)}\n` +
-              `• 成交量比率: ${zone.volumeRatio}x (>1.2✅)\n\n` +
-              
-              `*⚖️ 平衡度分析*\n` +
-              `• 平衡度: ${zone.balancePercent}% ${zone.balanceQuality}\n` +
-              `• 有效范围: 20%-80% ✅\n` +
-              `• 总成交量: ${zone.obVolume.toFixed(0)}\n` +
-              `• 高量部分: ${zone.obHighVolume.toFixed(0)}\n` +
-              `• 低量部分: ${zone.obLowVolume.toFixed(0)}\n\n` +
-              
-              `*🕯️ 突破K线形态分析*\n` +
-              `• 形态类型: ${bp.candleEmoji} ${bp.candleType}\n` +
-              `• K线方向: ${bp.direction} ${bp.directionMatchEmoji}\n` +
-              `• 突破强度: ${bp.breakoutEmoji} *${bp.breakoutStrength}* (${bp.strengthScore}/100)\n` +
-              `• 价格变动: ${bp.priceChangePercent}%\n` +
-              `• 实体占比: ${bp.bodyPercent}% (总波动: ${bp.totalRange})\n` +
-              `• 上影线: ${bp.upperWickPercent}%\n` +
-              `• 下影线: ${bp.lowerWickPercent}%\n` +
-              `• 形态描述: ${bp.description}\n` +
-              `• *建议: ${bp.recommendation}*${patternWarning}\n\n` +
-              
-              `*⏰ 时间与时段信息*\n` +
-              `• OB 形成时间: ${formatNZTime(zone.startTime)}\n` +
-              `• 突破确认时间: ${formatNZTime(zone.confirmationTime)}\n` +
-              `• 确认时段: ${sessionInfo.emoji} *${sessionInfo.session}*\n` +
-              `• 时段描述: ${sessionInfo.description}${reliabilityWarning}\n\n` +
-              
-              `_此区域已通过成交量、平衡度与K线形态三重验证_`;
-
-            newNotifications.push({
-              message,
-              subject: `🔔 ${symbol} ${tf} 新${zone.type}区域 [${bp.breakoutStrength}突破] [平衡度${zone.balancePercent}%] [${sessionInfo.session}]`,
-            });
-          }
-        }
-      }
+      allZonesData.push({
+        symbol,
+        timeframe: tf,
+        zones: result
+      });
     }
-    return newNotifications;
   }
 
+  // ============================================================================
+  // 🆕 步骤2：预检测潜在新zones（方案B的核心）
+  // ============================================================================
+  
+  context.log("\n🔍 Step 2: Pre-checking for potential new zones...");
+  const potentialNewZones = detectPotentialNewZones(allZonesData, context);
+  
+  if (potentialNewZones.length === 0) {
+    context.log("\n✅ No potential new zones detected in the last 10 minutes.");
+    context.log("⚡ Skipping database read - ZERO database operations!");
+    
+    const executionTime = ((Date.now() - executionStart) / 1000).toFixed(2);
+    
+    return context.res.json({
+      success: true,
+      new_zones_found: 0,
+      database_reads: 0,      // 🎯 关键：0次读取
+      database_writes: 0,     // 🎯 关键：0次写入
+      execution_time_seconds: executionTime,
+      optimization_triggered: true,
+      message: "No new zones in time window - DB operations skipped",
+      timestamp: new Date().toISOString()
+    });
+  }
+
+  context.log(`\n🆕 Found ${potentialNewZones.length} potential new zones - proceeding to DB check...`);
+
+  // ============================================================================
+  // 🆕 步骤3：只有检测到潜在新zone时，才读取数据库
+  // ============================================================================
+  
+  context.log("\n💾 Step 3: Loading existing zones from database...");
+  const previousZones = await loadRecentZones(databases, DB_ID, COLLECTION_ID, context);
+
+  // ============================================================================
+  // 🆕 步骤4：精确比对，找出真正的新zones
+  // ============================================================================
+  
+  context.log("\n🔍 Step 4: Comparing with existing zones...");
+  const confirmedNewZones = [];
   const allNewNotifications = [];
   
-  for (const symbol of CONFIG.SYMBOLS) {
-    const notifications = await analyzeSymbol(symbol, context);
-    allNewNotifications.push(...notifications);
+  for (const potentialZone of potentialNewZones) {
+    if (!previousZones.has(potentialZone.identifier)) {
+      context.log(`✅ Confirmed new zone: ${potentialZone.identifier}`);
+      confirmedNewZones.push(potentialZone.identifier);
+      
+      const { message, subject } = generateNotificationMessage(
+        potentialZone.symbol,
+        potentialZone.timeframe,
+        potentialZone.zone,
+        CONFIG
+      );
+      
+      allNewNotifications.push({ message, subject });
+    } else {
+      context.log(`⏭️ Zone already exists: ${potentialZone.identifier}`);
+    }
   }
 
+  // ============================================================================
+  // 🆕 步骤5：批量保存真正的新zones
+  // ============================================================================
+  
+  let savedCount = 0;
+  if (confirmedNewZones.length > 0) {
+    context.log(`\n💾 Step 5: Saving ${confirmedNewZones.length} new zones to database...`);
+    savedCount = await saveNewZonesBatch(databases, DB_ID, COLLECTION_ID, confirmedNewZones, context);
+  } else {
+    context.log("\n✅ No new zones to save.");
+  }
+
+  // ============================================================================
+  // 🆕 步骤6：发送通知
+  // ============================================================================
+  
   if (allNewNotifications.length > 0) {
-    context.log(`\n✉️ Sending ${allNewNotifications.length} notification(s)...`);
+    context.log(`\n✉️ Step 6: Sending ${allNewNotifications.length} notification(s)...`);
     for (const n of allNewNotifications) {
       await sendTelegramNotification(CONFIG, n.message, context);
       await sendEmailNotification(CONFIG, n.subject, n.message, context);
       await new Promise(resolve => setTimeout(resolve, 1000));
     }
   } else {
-    context.log("\n✅ No new zones found across all symbols.");
+    context.log("\n✅ No notifications to send.");
   }
 
+  // ============================================================================
+  // 🆕 步骤7：返回执行统计
+  // ============================================================================
+  
+  const executionTime = ((Date.now() - executionStart) / 1000).toFixed(2);
+  
   context.log("\n🎉 Function execution finished successfully.");
+  context.log(`⏱️ Total execution time: ${executionTime}s`);
+  context.log(`📊 Database operations: 1 read + ${savedCount} writes`);
+  
   return context.res.json({
     success: true,
     new_zones_found: allNewNotifications.length,
+    potential_zones_detected: potentialNewZones.length,
+    confirmed_new_zones: confirmedNewZones.length,
+    database_reads: 1,
+    database_writes: savedCount,
+    records_loaded: previousZones.size,
+    execution_time_seconds: executionTime,
+    optimization_triggered: false,
     timestamp: new Date().toISOString()
   });
 };
