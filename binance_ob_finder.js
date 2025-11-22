@@ -1,4 +1,4 @@
-const { Client, Databases, Storage, ID, Query } = require("node-appwrite");
+const { Client, Databases, Storage, ID, Query, InputFile } = require("node-appwrite");
 const axios = require("axios");
 const nodemailer = require("nodemailer");
 
@@ -427,8 +427,8 @@ function logAllOBs(allZonesData, context) {
     }
     
     context.log(`\n${"═".repeat(80)}`);
-    context.log(`║ 🎯 交易对: ${symbol} - 时间周期: ${timeframe}` + " ".repeat(80 - 30 - symbol.length - timeframe.length) + "║");
-    context.log(`║    🟢 看涨OB: ${bullishCount} 个 | 🔴 看跌OB: ${bearishCount} 个` + " ".repeat(80 - 30 - bullishCount.toString().length - bearishCount.toString().length) + "║");
+    context.log(`║ 🎯 交易对: ${symbol} - 时间周期: ${timeframe}` + " ".repeat(Math.max(0, 80 - 30 - symbol.length - timeframe.length)) + "║");
+    context.log(`║    🟢 看涨OB: ${bullishCount} 个 | 🔴 看跌OB: ${bearishCount} 个` + " ".repeat(Math.max(0, 80 - 30 - bullishCount.toString().length - bearishCount.toString().length)) + "║");
     context.log(`${"═".repeat(80)}`);
     
     if (bullishCount > 0) {
@@ -820,22 +820,22 @@ function detectPotentialNewZones(allZonesData, context) {
 }
 
 // ============================================================================
-// --- 🆕 Storage缓存系统 ---
+// --- 🆕 修正后的Storage缓存系统 ---
 // ============================================================================
 
 /**
- * 从Storage加载已见zones
+ * ✅ 修正：从Storage加载已见zones
  */
 async function loadZonesFromStorage(storage, context) {
   try {
-    const result = await storage.getFileDownload(
+    // 🔑 修正：正确处理Buffer返回值
+    const fileBuffer = await storage.getFileDownload(
       RUNTIME_CONFIG.STORAGE_CONFIG.BUCKET_ID,
       RUNTIME_CONFIG.STORAGE_CONFIG.FILE_ID
     );
     
-    // 将ArrayBuffer转换为字符串
-    const decoder = new TextDecoder('utf-8');
-    const jsonString = decoder.decode(result);
+    // 将Buffer转换为字符串
+    const jsonString = fileBuffer.toString('utf-8');
     const data = JSON.parse(jsonString);
     
     context.log(
@@ -847,7 +847,12 @@ async function loadZonesFromStorage(storage, context) {
     
     return new Set(data.zones);
   } catch (e) {
-    if (e.code === 404) {
+    // 🔑 修正：更健壮的错误处理
+    if (e.message && e.message.includes('not found')) {
+      context.log("⚠️ Storage文件不存在，将创建新文件");
+      return new Set();
+    }
+    if (e.code === 404 || e.type === 'storage_file_not_found') {
       context.log("⚠️ Storage文件不存在，将创建新文件");
       return new Set();
     }
@@ -857,7 +862,7 @@ async function loadZonesFromStorage(storage, context) {
 }
 
 /**
- * 保存zones到Storage
+ * ✅ 修正：保存zones到Storage
  */
 async function saveZonesToStorage(storage, zones, context) {
   try {
@@ -873,14 +878,21 @@ async function saveZonesToStorage(storage, zones, context) {
     };
     
     const jsonString = JSON.stringify(data, null, 2);
-    const blob = new Blob([jsonString], { type: 'application/json' });
     
-    // 删除旧文件
+    // 🔑 修正：使用InputFile.fromBuffer代替Blob
+    const fileBuffer = Buffer.from(jsonString, 'utf-8');
+    const inputFile = InputFile.fromBuffer(
+      fileBuffer,
+      RUNTIME_CONFIG.STORAGE_CONFIG.FILE_ID
+    );
+    
+    // 先尝试删除旧文件
     try {
       await storage.deleteFile(
         RUNTIME_CONFIG.STORAGE_CONFIG.BUCKET_ID,
         RUNTIME_CONFIG.STORAGE_CONFIG.FILE_ID
       );
+      context.log("   🗑️ 删除旧Storage文件");
     } catch (e) {
       // 文件不存在，忽略
     }
@@ -889,7 +901,7 @@ async function saveZonesToStorage(storage, zones, context) {
     await storage.createFile(
       RUNTIME_CONFIG.STORAGE_CONFIG.BUCKET_ID,
       RUNTIME_CONFIG.STORAGE_CONFIG.FILE_ID,
-      blob
+      inputFile
     );
     
     context.log(
@@ -899,6 +911,7 @@ async function saveZonesToStorage(storage, zones, context) {
     );
   } catch (e) {
     context.error("❌ 保存到Storage失败:", e.message);
+    context.error("   错误详情:", e);
   }
 }
 
@@ -1003,13 +1016,20 @@ async function syncStorageToDatabase(storage, databases, DB_ID, COLLECTION_ID, a
       for (const identifier of toAdd) {
         const zoneData = zoneMap.get(identifier);
         if (zoneData) {
-          await saveFullZoneToDatabase(databases, DB_ID, COLLECTION_ID, zoneData, identifier, context);
-          savedCount++;
+          const saved = await saveFullZoneToDatabase(databases, DB_ID, COLLECTION_ID, zoneData, identifier, context);
+          if (saved) savedCount++;
         } else {
           // 如果找不到完整数据，保存基础identifier
-          await databases.createDocument(DB_ID, COLLECTION_ID, ID.unique(), {
-            zoneIdentifier: identifier
-          }).catch(() => {});
+          try {
+            await databases.createDocument(DB_ID, COLLECTION_ID, ID.unique(), {
+              zoneIdentifier: identifier
+            });
+            savedCount++;
+          } catch (e) {
+            if (e.code !== 409) {
+              context.log(`   ⚠️ 保存失败: ${identifier}`);
+            }
+          }
         }
       }
       
@@ -1086,10 +1106,12 @@ async function saveFullZoneToDatabase(databases, DB_ID, COLLECTION_ID, zoneData,
     };
     
     await databases.createDocument(DB_ID, COLLECTION_ID, ID.unique(), doc);
+    return true;
   } catch (e) {
     if (e.code !== 409) {
       context.log(`   ⚠️ 保存失败: ${identifier.substring(0, 30)}...`);
     }
+    return false;
   }
 }
 
@@ -1120,7 +1142,7 @@ function saveNewZonesAsync(databases, DB_ID, COLLECTION_ID, newZoneIdentifiers, 
       }
     })
   ).then(results => {
-    const saved = results.filter(r => r !== null).length;
+    const saved = results.filter(r => r).length;
     context.log(`   📝 异步保存完成: ${saved}/${newZoneIdentifiers.length} 条`);
   }).catch(e => {
     context.error("   ❌ 异步保存失败:", e.message);
@@ -1205,9 +1227,9 @@ function generateNotificationMessage(symbol, timeframe, zone, CONFIG) {
 // ============================================================================
 module.exports = async (context) => {
   const executionStart = Date.now();
-  context.log("🚀 Function execution started (v4.0 - Storage缓存 + Database备份)...");
+  context.log("🚀 Function execution started (v4.1 - 修正Storage操作)...");
   context.log(`⏰ 执行时间: ${new Date().toISOString()}`);
-  context.log(`🔄 执行频率: 每 ${RUNTIME_CONFIG.EXECUTION_INTERVAL_MINUTES} 分钟`);
+  context.log(`🔄 执行频率: 每 ${RUNTIME_CONFIG.EXECUTION_INTERVAL_MINUTES} 分钟 (需在Appwrite中配置Schedule)`);
   context.log(`💾 缓存方式: Appwrite Storage (主) + Database (备份)\n`);
 
   const CONFIG = {
