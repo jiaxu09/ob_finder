@@ -18,7 +18,7 @@ const RUNTIME_CONFIG = {
 };
 
 // ============================================================================
-// --- 突破K线形态分析模块（与原代码完全一致）---
+// --- 突破K线形态分析模块 ---
 // ============================================================================
 
 function analyzeBreakoutCandlePattern(breakoutCandle, obType) {
@@ -181,7 +181,7 @@ function generateCandleDescription(bodyPercent, upperWickPercent, lowerWickPerce
 }
 
 // ============================================================================
-// --- 辅助函数（与原代码完全一致）---
+// --- 辅助函数 ---
 // ============================================================================
 
 async function sendTelegramNotification(config, message, context) {
@@ -302,7 +302,175 @@ function getMarketSession(date) {
 }
 
 // ============================================================================
-// --- Order Block 技术指标计算（与原代码完全一致）---
+// --- 🆕 OB详细信息显示函数 ---
+// ============================================================================
+
+function formatOBDetails(ob, index, symbol, timeframe) {
+  const bp = ob.breakoutPattern;
+  const sessionInfo = getMarketSession(ob.confirmationTime);
+  
+  const formatTime = (date) => date.toISOString().replace('T', ' ').substring(0, 19) + ' UTC';
+  
+  const priceDecimal = ob.top > 100 ? 2 : 6;
+  
+  return `
+╔═══════════════════════════════════════════════════════════════════════════════
+║ OB #${index + 1} - ${symbol} ${timeframe} - ${ob.type === "Support" ? "🟢 BULLISH SUPPORT" : "🔴 BEARISH RESISTANCE"}
+╠═══════════════════════════════════════════════════════════════════════════════
+║ 📍 价格区间
+║   ├─ Top:    ${ob.top.toFixed(priceDecimal)}
+║   ├─ Bottom: ${ob.bottom.toFixed(priceDecimal)}
+║   └─ Range:  ${((ob.top - ob.bottom) / ob.bottom * 100).toFixed(3)}%
+║
+║ ⏰ 时间信息
+║   ├─ 形成时间: ${formatTime(ob.startTime)}
+║   ├─ 确认时间: ${formatTime(ob.confirmationTime)}
+║   ├─ 交易时段: ${sessionInfo.emoji} ${sessionInfo.session}
+║   ├─ 时段描述: ${sessionInfo.description}
+║   └─ 时段可靠性: ${sessionInfo.reliable ? "✅ 高流动性" : "⚠️ 低流动性"}
+║
+║ 📊 成交量分析 ${parseFloat(ob.volumeRatio) >= 1.2 ? "✅ 已通过" : "❌ 未通过"}
+║   ├─ 突破成交量: ${ob.breakoutVolume.toFixed(0)}
+║   ├─ SMA20基准: ${ob.volumeSMA20.toFixed(0)}
+║   ├─ 成交量比率: ${ob.volumeRatio}x ${parseFloat(ob.volumeRatio) >= 1.2 ? "✅ (>1.2)" : "❌ (<1.2)"}
+║   ├─ OB总成交量: ${ob.obVolume.toFixed(0)}
+║   ├─ 高量部分: ${ob.obHighVolume.toFixed(0)}
+║   └─ 低量部分: ${ob.obLowVolume.toFixed(0)}
+║
+║ ⚖️ 平衡度评估 ${ob.balancePercent >= 20 && ob.balancePercent <= 80 ? "✅ 已通过" : "❌ 未通过"}
+║   ├─ 平衡度: ${ob.balancePercent}% ${ob.balanceQuality}
+║   ├─ 有效范围: 20%-80% ${ob.balancePercent >= 20 && ob.balancePercent <= 80 ? "✅" : "❌"}
+║   └─ 平衡评价: ${
+        ob.balancePercent >= 60 && ob.balancePercent <= 80 ? "理想的买卖平衡" :
+        ob.balancePercent >= 40 && ob.balancePercent < 60 ? "较好的买卖平衡" :
+        ob.balancePercent >= 20 && ob.balancePercent < 40 ? "一般的买卖平衡" :
+        "买卖失衡"
+      }
+║
+║ 🕯️ 突破K线形态分析
+║   ├─ 形态类型: ${bp.candleEmoji} ${bp.candleType}
+║   ├─ K线方向: ${bp.direction} ${bp.directionMatchEmoji}
+║   ├─ 方向匹配: ${bp.isDirectionMatched ? "✅ 与OB类型一致" : "⚠️ 与OB类型不一致"}
+║   ├─ 突破强度: ${bp.breakoutEmoji} ${bp.breakoutStrength} (得分: ${bp.strengthScore}/100)
+║   ├─ 价格变动: ${bp.priceChangePercent}%
+║   ├─ 实体占比: ${bp.bodyPercent}% (实体大小: ${bp.body})
+║   ├─ 上影线: ${bp.upperWickPercent}% (长度: ${bp.upperWick})
+║   ├─ 下影线: ${bp.lowerWickPercent}% (长度: ${bp.lowerWick})
+║   ├─ 总波动: ${bp.totalRange}
+║   ├─ 形态描述: ${bp.description}
+║   └─ 交易建议: ${bp.recommendation}
+║
+║ 🎯 状态信息
+║   ├─ Breaker: ${ob.breaker ? "🟡 已触及" : "🟢 未触及"}
+║   ├─ 有效性: ${ob.isValid ? "✅ 有效" : "❌ 已失效"}
+${ob.breaker ? `║   └─ 触及时间: ${formatTime(ob.breakTime)}` : "║   └─ 区域完整性: 保持完好"}
+║
+║ 💡 综合评分
+║   ├─ K线强度: ${bp.strengthScore}/100 ${bp.breakoutEmoji}
+║   ├─ 成交量: ${parseFloat(ob.volumeRatio) >= 1.2 ? "✅" : "❌"} (${ob.volumeRatio}x)
+║   ├─ 平衡度: ${ob.balancePercent >= 20 && ob.balancePercent <= 80 ? "✅" : "❌"} (${ob.balancePercent}%)
+║   ├─ 时段: ${sessionInfo.reliable ? "✅" : "⚠️"} (${sessionInfo.session})
+║   └─ 整体评价: ${
+        bp.strengthScore >= 80 && parseFloat(ob.volumeRatio) >= 1.2 && sessionInfo.reliable 
+          ? "🔥🔥🔥 极强信号" :
+        bp.strengthScore >= 60 && parseFloat(ob.volumeRatio) >= 1.2 
+          ? "🔥🔥 强信号" :
+        bp.strengthScore >= 40 
+          ? "🔥 中等信号" :
+          "⚠️ 弱信号"
+      }
+╚═══════════════════════════════════════════════════════════════════════════════
+`;
+}
+
+function logAllOBs(allZonesData, context) {
+  context.log("\n" + "█".repeat(80));
+  context.log("█" + " ".repeat(78) + "█");
+  context.log("█" + " ".repeat(20) + "📊 所有检测到的 ORDER BLOCKS 详细信息" + " ".repeat(20) + "█");
+  context.log("█" + " ".repeat(78) + "█");
+  context.log("█".repeat(80));
+  
+  let totalBullish = 0;
+  let totalBearish = 0;
+  let totalHighQuality = 0;
+  let totalMediumQuality = 0;
+  let totalLowQuality = 0;
+  
+  for (const { symbol, timeframe, zones } of allZonesData) {
+    const bullishCount = zones.bullishOBs.length;
+    const bearishCount = zones.bearishOBs.length;
+    
+    totalBullish += bullishCount;
+    totalBearish += bearishCount;
+    
+    if (bullishCount === 0 && bearishCount === 0) {
+      context.log(`\n${symbol} - ${timeframe}: ⚠️ 未检测到Order Blocks`);
+      continue;
+    }
+    
+    context.log(`\n${"═".repeat(80)}`);
+    context.log(`║ 🎯 交易对: ${symbol} - 时间周期: ${timeframe}` + " ".repeat(80 - 30 - symbol.length - timeframe.length) + "║");
+    context.log(`║    🟢 看涨OB: ${bullishCount} 个 | 🔴 看跌OB: ${bearishCount} 个` + " ".repeat(80 - 30 - bullishCount.toString().length - bearishCount.toString().length) + "║");
+    context.log(`${"═".repeat(80)}`);
+    
+    // 显示所有看涨OB
+    if (bullishCount > 0) {
+      context.log(`\n${"─".repeat(80)}`);
+      context.log(`🟢 BULLISH ORDER BLOCKS (看涨支撑区) - 共 ${bullishCount} 个`);
+      context.log(`${"─".repeat(80)}`);
+      
+      zones.bullishOBs.forEach((ob, idx) => {
+        context.log(formatOBDetails(ob, idx, symbol, timeframe));
+        
+        // 统计质量
+        const score = ob.breakoutPattern.strengthScore;
+        if (score >= 80) totalHighQuality++;
+        else if (score >= 60) totalMediumQuality++;
+        else totalLowQuality++;
+      });
+    }
+    
+    // 显示所有看跌OB
+    if (bearishCount > 0) {
+      context.log(`\n${"─".repeat(80)}`);
+      context.log(`🔴 BEARISH ORDER BLOCKS (看跌阻力区) - 共 ${bearishCount} 个`);
+      context.log(`${"─".repeat(80)}`);
+      
+      zones.bearishOBs.forEach((ob, idx) => {
+        context.log(formatOBDetails(ob, idx, symbol, timeframe));
+        
+        // 统计质量
+        const score = ob.breakoutPattern.strengthScore;
+        if (score >= 80) totalHighQuality++;
+        else if (score >= 60) totalMediumQuality++;
+        else totalLowQuality++;
+      });
+    }
+  }
+  
+  // 总计统计
+  context.log("\n" + "█".repeat(80));
+  context.log("█" + " ".repeat(78) + "█");
+  context.log("█" + " ".repeat(30) + "📈 总计统计报告" + " ".repeat(30) + "█");
+  context.log("█" + " ".repeat(78) + "█");
+  context.log("█".repeat(80));
+  context.log(`
+║ 🟢 总看涨OB数量: ${totalBullish}
+║ 🔴 总看跌OB数量: ${totalBearish}
+║ 📊 Order Blocks总计: ${totalBullish + totalBearish}
+║
+║ 📊 质量分布:
+║   ├─ 🔥🔥🔥 高质量OB (≥80分): ${totalHighQuality}
+║   ├─ 🔥🔥 中等质量OB (60-79分): ${totalMediumQuality}
+║   └─ 🔥 低质量OB (<60分): ${totalLowQuality}
+║
+║ 💡 建议关注: ${totalHighQuality} 个高质量Order Blocks
+`);
+  context.log("█".repeat(80) + "\n");
+}
+
+// ============================================================================
+// --- Order Block 技术指标计算 ---
 // ============================================================================
 
 function calculateTrueRange(kline, prevKline) {
@@ -361,7 +529,7 @@ function evaluateBalanceQuality(balance) {
 }
 
 // ============================================================================
-// --- Order Block 识别（与原代码完全一致）---
+// --- Order Block 识别 ---
 // ============================================================================
 
 function findOrderBlocksPineScriptLogic(
@@ -597,10 +765,6 @@ function findOrderBlocksPineScriptLogic(
 // --- 🆕 方案B：潜在新zone预检测 ---
 // ============================================================================
 
-/**
- * 🆕 检测是否有潜在的新zone（不读数据库）
- * 原理：只检查最近10分钟内形成的OB
- */
 function detectPotentialNewZones(allZonesData, context) {
   const now = new Date();
   const timeThreshold = new Date(now.getTime() - RUNTIME_CONFIG.TIME_BUFFER_MINUTES * 60 * 1000);
@@ -610,7 +774,6 @@ function detectPotentialNewZones(allZonesData, context) {
   for (const { symbol, timeframe, zones } of allZonesData) {
     const allZones = [...zones.bullishOBs, ...zones.bearishOBs];
     
-    // 🔑 关键过滤：只保留最近10分钟内确认的OB
     const recentZones = allZones.filter(zone => 
       zone.confirmationTime >= timeThreshold
     );
@@ -640,9 +803,6 @@ function detectPotentialNewZones(allZonesData, context) {
 // --- 🆕 优化后的数据库操作 ---
 // ============================================================================
 
-/**
- * 🆕 只读取最近7天的记录
- */
 async function loadRecentZones(databases, DB_ID, COLLECTION_ID, context) {
   try {
     const cutoffDate = new Date();
@@ -667,9 +827,6 @@ async function loadRecentZones(databases, DB_ID, COLLECTION_ID, context) {
   }
 }
 
-/**
- * 🆕 批量保存新zones（并行写入）
- */
 async function saveNewZonesBatch(databases, DB_ID, COLLECTION_ID, newZones, context) {
   if (newZones.length === 0) return 0;
   
@@ -778,7 +935,7 @@ function generateNotificationMessage(symbol, timeframe, zone, CONFIG) {
 // ============================================================================
 module.exports = async (context) => {
   const executionStart = Date.now();
-  context.log("🚀 Function execution started (Optimized v2.0 with Pre-check)...");
+  context.log("🚀 Function execution started (Optimized v2.0 with Pre-check & Full OB Display)...");
 
   const CONFIG = {
     SYMBOLS: ["BTCUSDT", "ETHUSDT"],
@@ -816,7 +973,7 @@ module.exports = async (context) => {
   const COLLECTION_ID = "seen_zones";
 
   // ============================================================================
-  // 🆕 步骤1：先分析所有symbols，收集所有OB数据（不读数据库）
+  // 步骤1：先分析所有symbols，收集所有OB数据
   // ============================================================================
   
   context.log("\n📊 Step 1: Analyzing all symbols and timeframes...");
@@ -860,7 +1017,13 @@ module.exports = async (context) => {
   }
 
   // ============================================================================
-  // 🆕 步骤2：预检测潜在新zones（方案B的核心）
+  // 🆕 显示所有检测到的Order Blocks详细信息
+  // ============================================================================
+  
+  logAllOBs(allZonesData, context);
+
+  // ============================================================================
+  // 步骤2：预检测潜在新zones
   // ============================================================================
   
   context.log("\n🔍 Step 2: Pre-checking for potential new zones...");
@@ -875,8 +1038,8 @@ module.exports = async (context) => {
     return context.res.json({
       success: true,
       new_zones_found: 0,
-      database_reads: 0,      // 🎯 关键：0次读取
-      database_writes: 0,     // 🎯 关键：0次写入
+      database_reads: 0,
+      database_writes: 0,
       execution_time_seconds: executionTime,
       optimization_triggered: true,
       message: "No new zones in time window - DB operations skipped",
@@ -887,14 +1050,14 @@ module.exports = async (context) => {
   context.log(`\n🆕 Found ${potentialNewZones.length} potential new zones - proceeding to DB check...`);
 
   // ============================================================================
-  // 🆕 步骤3：只有检测到潜在新zone时，才读取数据库
+  // 步骤3：只有检测到潜在新zone时，才读取数据库
   // ============================================================================
   
   context.log("\n💾 Step 3: Loading existing zones from database...");
   const previousZones = await loadRecentZones(databases, DB_ID, COLLECTION_ID, context);
 
   // ============================================================================
-  // 🆕 步骤4：精确比对，找出真正的新zones
+  // 步骤4：精确比对，找出真正的新zones
   // ============================================================================
   
   context.log("\n🔍 Step 4: Comparing with existing zones...");
@@ -920,7 +1083,7 @@ module.exports = async (context) => {
   }
 
   // ============================================================================
-  // 🆕 步骤5：批量保存真正的新zones
+  // 步骤5：批量保存真正的新zones
   // ============================================================================
   
   let savedCount = 0;
@@ -932,7 +1095,7 @@ module.exports = async (context) => {
   }
 
   // ============================================================================
-  // 🆕 步骤6：发送通知
+  // 步骤6：发送通知
   // ============================================================================
   
   if (allNewNotifications.length > 0) {
@@ -947,7 +1110,7 @@ module.exports = async (context) => {
   }
 
   // ============================================================================
-  // 🆕 步骤7：返回执行统计
+  // 步骤7：返回执行统计
   // ============================================================================
   
   const executionTime = ((Date.now() - executionStart) / 1000).toFixed(2);
