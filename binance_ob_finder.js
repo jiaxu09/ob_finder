@@ -1,20 +1,38 @@
-const { Client, Databases, ID, Query } = require("node-appwrite");
+const { Client, Databases, Storage, ID, Query } = require("node-appwrite");
 const axios = require("axios");
 const nodemailer = require("nodemailer");
 
 // ============================================================================
-// --- 🆕 配置区域 ---
+// --- 🆕 优化后的配置区域 ---
 // ============================================================================
 const RUNTIME_CONFIG = {
-  // 运行间隔（分钟）- 用于判断是否为新zone
+  // 函数执行间隔（分钟）
   EXECUTION_INTERVAL_MINUTES: 5,
   
-  // 时间缓冲（分钟）- 考虑到延迟，检查过去10分钟的数据
-  TIME_BUFFER_MINUTES: 10,
+  // 🔑 根据timeframe设置检测窗口（分钟）
+  TIMEFRAME_WINDOWS: {
+    '1m': 30,
+    '5m': 60,
+    '15m': 120,
+    '1h': 150,      // 2.5小时
+    '4h': 600,      // 10小时
+    '1d': 3000,     // 50小时
+  },
   
-  // 数据库优化
-  DB_DAYS_LOOKBACK: 7,        // 只读取最近7天的数据
-  DB_MAX_RECORDS: 200,        // 最多读取200条记录
+  // 🆕 Storage配置（主要缓存）
+  STORAGE_CONFIG: {
+    BUCKET_ID: "zone_cache",
+    FILE_ID: "seen_zones.json",
+    CLEANUP_DAYS: 30,  // 保留30天数据
+  },
+  
+  // 🆕 Database配置（备份和分析）
+  DB_CONFIG: {
+    SYNC_HOUR_UTC: 2,        // 每天UTC 2:00同步到Database
+    SYNC_WINDOW_MINUTES: 10, // 2:00-2:10之间执行
+    DAYS_LOOKBACK: 30,       // Database保留30天
+    SAVE_FULL_DATA: true,    // 保存完整OB数据用于分析
+  },
 };
 
 // ============================================================================
@@ -413,7 +431,6 @@ function logAllOBs(allZonesData, context) {
     context.log(`║    🟢 看涨OB: ${bullishCount} 个 | 🔴 看跌OB: ${bearishCount} 个` + " ".repeat(80 - 30 - bullishCount.toString().length - bearishCount.toString().length) + "║");
     context.log(`${"═".repeat(80)}`);
     
-    // 显示所有看涨OB
     if (bullishCount > 0) {
       context.log(`\n${"─".repeat(80)}`);
       context.log(`🟢 BULLISH ORDER BLOCKS (看涨支撑区) - 共 ${bullishCount} 个`);
@@ -421,8 +438,6 @@ function logAllOBs(allZonesData, context) {
       
       zones.bullishOBs.forEach((ob, idx) => {
         context.log(formatOBDetails(ob, idx, symbol, timeframe));
-        
-        // 统计质量
         const score = ob.breakoutPattern.strengthScore;
         if (score >= 80) totalHighQuality++;
         else if (score >= 60) totalMediumQuality++;
@@ -430,7 +445,6 @@ function logAllOBs(allZonesData, context) {
       });
     }
     
-    // 显示所有看跌OB
     if (bearishCount > 0) {
       context.log(`\n${"─".repeat(80)}`);
       context.log(`🔴 BEARISH ORDER BLOCKS (看跌阻力区) - 共 ${bearishCount} 个`);
@@ -438,8 +452,6 @@ function logAllOBs(allZonesData, context) {
       
       zones.bearishOBs.forEach((ob, idx) => {
         context.log(formatOBDetails(ob, idx, symbol, timeframe));
-        
-        // 统计质量
         const score = ob.breakoutPattern.strengthScore;
         if (score >= 80) totalHighQuality++;
         else if (score >= 60) totalMediumQuality++;
@@ -448,7 +460,6 @@ function logAllOBs(allZonesData, context) {
     }
   }
   
-  // 总计统计
   context.log("\n" + "█".repeat(80));
   context.log("█" + " ".repeat(78) + "█");
   context.log("█" + " ".repeat(30) + "📈 总计统计报告" + " ".repeat(30) + "█");
@@ -762,16 +773,19 @@ function findOrderBlocksPineScriptLogic(
 }
 
 // ============================================================================
-// --- 🆕 方案B：潜在新zone预检测 ---
+// --- 潜在新zone预检测 ---
 // ============================================================================
 
 function detectPotentialNewZones(allZonesData, context) {
   const now = new Date();
-  const timeThreshold = new Date(now.getTime() - RUNTIME_CONFIG.TIME_BUFFER_MINUTES * 60 * 1000);
-  
   const potentialNewZones = [];
   
+  context.log("\n🔍 检测潜在新zones (使用智能时间窗口)...");
+  
   for (const { symbol, timeframe, zones } of allZonesData) {
+    const windowMinutes = RUNTIME_CONFIG.TIMEFRAME_WINDOWS[timeframe] || 150;
+    const timeThreshold = new Date(now.getTime() - windowMinutes * 60 * 1000);
+    
     const allZones = [...zones.bullishOBs, ...zones.bearishOBs];
     
     const recentZones = allZones.filter(zone => 
@@ -780,8 +794,9 @@ function detectPotentialNewZones(allZonesData, context) {
     
     if (recentZones.length > 0) {
       context.log(
-        `🆕 ${symbol} ${timeframe}: Found ${recentZones.length} potential new zones ` +
-        `(confirmed after ${timeThreshold.toISOString()})`
+        `  🆕 ${symbol} ${timeframe}: 发现 ${recentZones.length} 个潜在新zones\n` +
+        `      检测窗口: ${windowMinutes} 分钟 (${(windowMinutes/60).toFixed(1)} 小时)\n` +
+        `      时间阈值: ${timeThreshold.toISOString()}`
       );
       
       for (const zone of recentZones) {
@@ -790,9 +805,14 @@ function detectPotentialNewZones(allZonesData, context) {
           identifier: zoneIdentifier,
           symbol,
           timeframe,
-          zone
+          zone,
+          windowUsed: windowMinutes
         });
       }
+    } else {
+      context.log(
+        `  ⏭️ ${symbol} ${timeframe}: 在最近 ${windowMinutes} 分钟内无新zones`
+      );
     }
   }
   
@@ -800,65 +820,315 @@ function detectPotentialNewZones(allZonesData, context) {
 }
 
 // ============================================================================
-// --- 🆕 优化后的数据库操作 ---
+// --- 🆕 Storage缓存系统 ---
 // ============================================================================
 
-async function loadRecentZones(databases, DB_ID, COLLECTION_ID, context) {
+/**
+ * 从Storage加载已见zones
+ */
+async function loadZonesFromStorage(storage, context) {
   try {
-    const cutoffDate = new Date();
-    cutoffDate.setDate(cutoffDate.getDate() - RUNTIME_CONFIG.DB_DAYS_LOOKBACK);
-    const timestamp = cutoffDate.toISOString();
-    
-    const response = await databases.listDocuments(
-      DB_ID, 
-      COLLECTION_ID, 
-      [
-        Query.greaterThan('$createdAt', timestamp),
-        Query.limit(RUNTIME_CONFIG.DB_MAX_RECORDS),
-        Query.orderDesc('$createdAt')
-      ]
+    const result = await storage.getFileDownload(
+      RUNTIME_CONFIG.STORAGE_CONFIG.BUCKET_ID,
+      RUNTIME_CONFIG.STORAGE_CONFIG.FILE_ID
     );
     
-    context.log(`✅ Loaded ${response.documents.length} zones from DB (last ${RUNTIME_CONFIG.DB_DAYS_LOOKBACK} days)`);
-    return new Set(response.documents.map((doc) => doc.zoneIdentifier));
+    // 将ArrayBuffer转换为字符串
+    const decoder = new TextDecoder('utf-8');
+    const jsonString = decoder.decode(result);
+    const data = JSON.parse(jsonString);
+    
+    context.log(
+      `✅ 从Storage加载成功:\n` +
+      `   记录数量: ${data.zones.length}\n` +
+      `   最后更新: ${data.lastUpdated}\n` +
+      `   文件版本: ${data.version || 'v1'}`
+    );
+    
+    return new Set(data.zones);
   } catch (e) {
-    context.error("Failed to load recent zones from Appwrite DB:", e);
+    if (e.code === 404) {
+      context.log("⚠️ Storage文件不存在，将创建新文件");
+      return new Set();
+    }
+    context.error("❌ 加载Storage失败:", e.message);
     return new Set();
   }
 }
 
-async function saveNewZonesBatch(databases, DB_ID, COLLECTION_ID, newZones, context) {
-  if (newZones.length === 0) return 0;
-  
+/**
+ * 保存zones到Storage
+ */
+async function saveZonesToStorage(storage, zones, context) {
   try {
-    const promises = newZones.map(zoneId => 
-      databases.createDocument(DB_ID, COLLECTION_ID, ID.unique(), { 
-        zoneIdentifier: zoneId 
-      })
-      .catch(e => {
-        if (e.code !== 409) {
-          context.error(`Failed to save zone ${zoneId}:`, e.message);
-        }
-        return null;
-      })
-    );
+    const data = {
+      version: "v1.0",
+      zones: Array.from(zones),
+      lastUpdated: new Date().toISOString(),
+      count: zones.size,
+      metadata: {
+        cleanupDays: RUNTIME_CONFIG.STORAGE_CONFIG.CLEANUP_DAYS,
+        generatedBy: "OB-Detector-Optimized"
+      }
+    };
     
-    const results = await Promise.all(promises);
-    const savedCount = results.filter(r => r !== null).length;
+    const jsonString = JSON.stringify(data, null, 2);
+    const blob = new Blob([jsonString], { type: 'application/json' });
     
-    if (savedCount > 0) {
-      context.log(`✅ Batch saved ${savedCount} new zones to DB`);
+    // 删除旧文件
+    try {
+      await storage.deleteFile(
+        RUNTIME_CONFIG.STORAGE_CONFIG.BUCKET_ID,
+        RUNTIME_CONFIG.STORAGE_CONFIG.FILE_ID
+      );
+    } catch (e) {
+      // 文件不存在，忽略
     }
     
-    return savedCount;
+    // 上传新文件
+    await storage.createFile(
+      RUNTIME_CONFIG.STORAGE_CONFIG.BUCKET_ID,
+      RUNTIME_CONFIG.STORAGE_CONFIG.FILE_ID,
+      blob
+    );
+    
+    context.log(
+      `✅ 保存到Storage成功:\n` +
+      `   记录数量: ${zones.size}\n` +
+      `   文件大小: ${(jsonString.length / 1024).toFixed(2)} KB`
+    );
   } catch (e) {
-    context.error("Failed to batch save zones:", e);
+    context.error("❌ 保存到Storage失败:", e.message);
+  }
+}
+
+/**
+ * 清理Storage中的旧zones
+ */
+async function cleanupStorageZones(zones, context) {
+  const cutoffTime = Date.now() - RUNTIME_CONFIG.STORAGE_CONFIG.CLEANUP_DAYS * 24 * 60 * 60 * 1000;
+  
+  const cleanedZones = new Set(
+    Array.from(zones).filter(identifier => {
+      // 从identifier中提取时间戳: "BTCUSDT-1h-1705305600000-Support"
+      const parts = identifier.split('-');
+      if (parts.length >= 3) {
+        const timestamp = parseInt(parts[2]);
+        return timestamp > cutoffTime;
+      }
+      return true; // 保留格式不正确的记录
+    })
+  );
+  
+  const removed = zones.size - cleanedZones.size;
+  if (removed > 0) {
+    context.log(
+      `🗑️ 清理Storage数据:\n` +
+      `   移除过期记录: ${removed} 条 (>${RUNTIME_CONFIG.STORAGE_CONFIG.CLEANUP_DAYS}天)\n` +
+      `   保留记录: ${cleanedZones.size} 条`
+    );
+  }
+  
+  return cleanedZones;
+}
+
+// ============================================================================
+// --- 🆕 Database同步系统 ---
+// ============================================================================
+
+/**
+ * 判断是否应该同步到Database
+ */
+function shouldSyncToDatabase() {
+  const now = new Date();
+  const hour = now.getUTCHours();
+  const minute = now.getUTCMinutes();
+  
+  const syncHour = RUNTIME_CONFIG.DB_CONFIG.SYNC_HOUR_UTC;
+  const syncWindow = RUNTIME_CONFIG.DB_CONFIG.SYNC_WINDOW_MINUTES;
+  
+  // 在同步时间窗口内
+  return hour === syncHour && minute < syncWindow;
+}
+
+/**
+ * 从Storage同步到Database（每天一次）
+ */
+async function syncStorageToDatabase(storage, databases, DB_ID, COLLECTION_ID, allZonesData, context) {
+  try {
+    context.log("\n" + "=".repeat(80));
+    context.log("🔄 开始每日Database同步...");
+    context.log("=".repeat(80));
+    
+    // 1. 从Storage加载所有zones
+    const storageZones = await loadZonesFromStorage(storage, context);
+    
+    // 2. 从Database读取已存在的zones
+    const dbResponse = await databases.listDocuments(
+      DB_ID,
+      COLLECTION_ID,
+      [
+        Query.limit(1000),
+        Query.orderDesc('$createdAt')
+      ]
+    );
+    
+    const existingIds = new Set(dbResponse.documents.map(d => d.zoneIdentifier));
+    context.log(`   Database中现有记录: ${existingIds.size} 条`);
+    
+    // 3. 找出需要添加的zones
+    const toAdd = Array.from(storageZones).filter(z => !existingIds.has(z));
+    
+    if (toAdd.length === 0) {
+      context.log("   ✅ Database已是最新，无需同步");
+      return 0;
+    }
+    
+    context.log(`   📝 需要同步 ${toAdd.length} 条新记录`);
+    
+    // 4. 如果配置了保存完整数据，构建完整记录
+    if (RUNTIME_CONFIG.DB_CONFIG.SAVE_FULL_DATA) {
+      // 创建identifier到完整zone数据的映射
+      const zoneMap = new Map();
+      for (const { symbol, timeframe, zones } of allZonesData) {
+        const allZones = [...zones.bullishOBs, ...zones.bearishOBs];
+        for (const zone of allZones) {
+          const id = `${symbol}-${timeframe}-${zone.startTime.getTime()}-${zone.type}`;
+          zoneMap.set(id, { zone, symbol, timeframe });
+        }
+      }
+      
+      // 保存完整数据
+      let savedCount = 0;
+      for (const identifier of toAdd) {
+        const zoneData = zoneMap.get(identifier);
+        if (zoneData) {
+          await saveFullZoneToDatabase(databases, DB_ID, COLLECTION_ID, zoneData, identifier, context);
+          savedCount++;
+        } else {
+          // 如果找不到完整数据，保存基础identifier
+          await databases.createDocument(DB_ID, COLLECTION_ID, ID.unique(), {
+            zoneIdentifier: identifier
+          }).catch(() => {});
+        }
+      }
+      
+      context.log(`   ✅ 同步完成: ${savedCount} 条完整记录`);
+      return savedCount;
+    } else {
+      // 仅保存identifier
+      const promises = toAdd.map(zoneId =>
+        databases.createDocument(DB_ID, COLLECTION_ID, ID.unique(), {
+          zoneIdentifier: zoneId
+        }).catch(() => null)
+      );
+      
+      const results = await Promise.all(promises);
+      const savedCount = results.filter(r => r !== null).length;
+      
+      context.log(`   ✅ 同步完成: ${savedCount} 条记录`);
+      return savedCount;
+    }
+  } catch (e) {
+    context.error("❌ Database同步失败:", e.message);
     return 0;
   }
 }
 
+/**
+ * 保存完整OB数据到Database
+ */
+async function saveFullZoneToDatabase(databases, DB_ID, COLLECTION_ID, zoneData, identifier, context) {
+  const { zone, symbol, timeframe } = zoneData;
+  const sessionInfo = getMarketSession(zone.confirmationTime);
+  
+  try {
+    const doc = {
+      // 唯一标识
+      zoneIdentifier: identifier,
+      
+      // 基础信息
+      symbol: symbol,
+      timeframe: timeframe,
+      type: zone.type,
+      
+      // 价格信息
+      priceTop: zone.top,
+      priceBottom: zone.bottom,
+      priceRangePercent: parseFloat(((zone.top - zone.bottom) / zone.bottom * 100).toFixed(3)),
+      
+      // 时间信息
+      formationTime: zone.startTime.toISOString(),
+      confirmationTime: zone.confirmationTime.toISOString(),
+      
+      // 质量指标
+      strengthScore: zone.breakoutPattern.strengthScore,
+      volumeRatio: parseFloat(zone.volumeRatio),
+      balancePercent: zone.balancePercent,
+      
+      // K线形态
+      candleType: zone.breakoutPattern.candleType,
+      candleDirection: zone.breakoutPattern.direction,
+      isDirectionMatched: zone.breakoutPattern.isDirectionMatched,
+      
+      // 市场时段
+      marketSession: sessionInfo.session,
+      isReliableSession: sessionInfo.reliable,
+      
+      // 状态
+      isBreaker: zone.breaker,
+      breakerTime: zone.breakTime ? zone.breakTime.toISOString() : null,
+      isValid: zone.isValid,
+      
+      // 元数据
+      notificationSent: true,
+      syncedAt: new Date().toISOString(),
+    };
+    
+    await databases.createDocument(DB_ID, COLLECTION_ID, ID.unique(), doc);
+  } catch (e) {
+    if (e.code !== 409) {
+      context.log(`   ⚠️ 保存失败: ${identifier.substring(0, 30)}...`);
+    }
+  }
+}
+
+/**
+ * 异步保存新zones到Database（不阻塞主流程）
+ */
+function saveNewZonesAsync(databases, DB_ID, COLLECTION_ID, newZoneIdentifiers, allZonesData, context) {
+  // 创建identifier到完整zone数据的映射
+  const zoneMap = new Map();
+  for (const { symbol, timeframe, zones } of allZonesData) {
+    const allZones = [...zones.bullishOBs, ...zones.bearishOBs];
+    for (const zone of allZones) {
+      const id = `${symbol}-${timeframe}-${zone.startTime.getTime()}-${zone.type}`;
+      zoneMap.set(id, { zone, symbol, timeframe });
+    }
+  }
+  
+  // 异步保存
+  Promise.all(
+    newZoneIdentifiers.map(identifier => {
+      const zoneData = zoneMap.get(identifier);
+      if (zoneData && RUNTIME_CONFIG.DB_CONFIG.SAVE_FULL_DATA) {
+        return saveFullZoneToDatabase(databases, DB_ID, COLLECTION_ID, zoneData, identifier, context);
+      } else {
+        return databases.createDocument(DB_ID, COLLECTION_ID, ID.unique(), {
+          zoneIdentifier: identifier
+        }).catch(() => null);
+      }
+    })
+  ).then(results => {
+    const saved = results.filter(r => r !== null).length;
+    context.log(`   📝 异步保存完成: ${saved}/${newZoneIdentifiers.length} 条`);
+  }).catch(e => {
+    context.error("   ❌ 异步保存失败:", e.message);
+  });
+}
+
 // ============================================================================
-// --- 🆕 生成通知消息 ---
+// --- 生成通知消息 ---
 // ============================================================================
 
 function generateNotificationMessage(symbol, timeframe, zone, CONFIG) {
@@ -935,7 +1205,10 @@ function generateNotificationMessage(symbol, timeframe, zone, CONFIG) {
 // ============================================================================
 module.exports = async (context) => {
   const executionStart = Date.now();
-  context.log("🚀 Function execution started (Optimized v2.0 with Pre-check & Full OB Display)...");
+  context.log("🚀 Function execution started (v4.0 - Storage缓存 + Database备份)...");
+  context.log(`⏰ 执行时间: ${new Date().toISOString()}`);
+  context.log(`🔄 执行频率: 每 ${RUNTIME_CONFIG.EXECUTION_INTERVAL_MINUTES} 分钟`);
+  context.log(`💾 缓存方式: Appwrite Storage (主) + Database (备份)\n`);
 
   const CONFIG = {
     SYMBOLS: ["BTCUSDT", "ETHUSDT"],
@@ -968,24 +1241,25 @@ module.exports = async (context) => {
     .setProject('68f59e58002322d3d474')
     .setKey('standard_2555e90b24b6442cafa174ecccc387d2668557a61d73186f705f7e65681f9ed2cbbf5a672f55669cb9a549a5a8a282b2f1dd32e3f3a1a818dd06c2ce4e23f72da594fddd5dfcd736f0bb04d1151962a6fb9568a25c700e8d4746eddc96ec2538556dd23e696117ad6ebdbdb05856a5250fb125e03b3484fd6b73e24d245c59e8');
 
+  const storage = new Storage(client);
   const databases = new Databases(client);
   const DB_ID = "68f5a3fa001774a5ab3d";
   const COLLECTION_ID = "seen_zones";
 
   // ============================================================================
-  // 步骤1：先分析所有symbols，收集所有OB数据
+  // 步骤1：分析所有symbols，收集所有OB数据
   // ============================================================================
   
-  context.log("\n📊 Step 1: Analyzing all symbols and timeframes...");
+  context.log("📊 Step 1: 分析所有交易对和时间周期...\n");
   const allZonesData = [];
   
   for (const symbol of CONFIG.SYMBOLS) {
-    context.log(`\n--- Analyzing ${symbol} ---`);
+    context.log(`--- 分析 ${symbol} ---`);
     
     for (const tf of CONFIG.TIMEZONES) {
       const klines = await getKlines(symbol, tf, CONFIG.KLINE_LIMIT, context);
       if (!klines || klines.length <= CONFIG.SWING_LENGTH) {
-        context.log(`⚠️ Insufficient data for ${symbol} ${tf}, skipping.`);
+        context.log(`⚠️ ${symbol} ${tf} 数据不足，跳过`);
         continue;
       }
 
@@ -1001,11 +1275,11 @@ module.exports = async (context) => {
       );
       
       context.log(
-        `${symbol} ${tf}: ` +
-        `🟢 ${result.bullishOBs.length} bullish | ` +
-        `🔴 ${result.bearishOBs.length} bearish ` +
-        `(filtered: Vol ${result.stats.bullishRejectedByVolume + result.stats.bearishRejectedByVolume}, ` +
-        `Bal ${result.stats.bullishRejectedByBalance + result.stats.bearishRejectedByBalance})`
+        `  ${symbol} ${tf}: ` +
+        `🟢 ${result.bullishOBs.length} 看涨 | ` +
+        `🔴 ${result.bearishOBs.length} 看跌 ` +
+        `(已过滤: 成交量 ${result.stats.bullishRejectedByVolume + result.stats.bearishRejectedByVolume}, ` +
+        `平衡度 ${result.stats.bullishRejectedByBalance + result.stats.bearishRejectedByBalance})`
       );
       
       allZonesData.push({
@@ -1014,10 +1288,11 @@ module.exports = async (context) => {
         zones: result
       });
     }
+    context.log('');
   }
 
   // ============================================================================
-  // 🆕 显示所有检测到的Order Blocks详细信息
+  // 显示所有检测到的Order Blocks详细信息
   // ============================================================================
   
   logAllOBs(allZonesData, context);
@@ -1026,48 +1301,61 @@ module.exports = async (context) => {
   // 步骤2：预检测潜在新zones
   // ============================================================================
   
-  context.log("\n🔍 Step 2: Pre-checking for potential new zones...");
+  context.log("\n🔍 Step 2: 预检测潜在新zones...");
   const potentialNewZones = detectPotentialNewZones(allZonesData, context);
   
-  if (potentialNewZones.length === 0) {
-    context.log("\n✅ No potential new zones detected in the last 10 minutes.");
-    context.log("⚡ Skipping database read - ZERO database operations!");
+  // 🔑 检查是否需要执行每日同步
+  const needDailySync = shouldSyncToDatabase();
+  
+  if (potentialNewZones.length === 0 && !needDailySync) {
+    context.log("\n✅ 未检测到潜在新zones，且不在同步时间窗口");
+    context.log("⚡ 跳过所有存储操作 - 0次Storage/Database操作！");
     
     const executionTime = ((Date.now() - executionStart) / 1000).toFixed(2);
     
     return context.res.json({
       success: true,
       new_zones_found: 0,
+      storage_reads: 0,
+      storage_writes: 0,
       database_reads: 0,
       database_writes: 0,
       execution_time_seconds: executionTime,
       optimization_triggered: true,
-      message: "No new zones in time window - DB operations skipped",
+      message: "无新zones且不在同步窗口 - 已跳过所有存储操作",
       timestamp: new Date().toISOString()
     });
   }
 
-  context.log(`\n🆕 Found ${potentialNewZones.length} potential new zones - proceeding to DB check...`);
-
   // ============================================================================
-  // 步骤3：只有检测到潜在新zone时，才读取数据库
+  // 步骤3：从Storage读取已存在的zones
   // ============================================================================
   
-  context.log("\n💾 Step 3: Loading existing zones from database...");
-  const previousZones = await loadRecentZones(databases, DB_ID, COLLECTION_ID, context);
+  let storageReads = 0;
+  let storageWrites = 0;
+  let databaseReads = 0;
+  let databaseWrites = 0;
+  
+  context.log("\n💾 Step 3: 从Storage加载已存在的zones...");
+  let previousZones = await loadZonesFromStorage(storage, context);
+  storageReads++;
 
   // ============================================================================
-  // 步骤4：精确比对，找出真正的新zones
+  // 步骤4：比对并确认新zones
   // ============================================================================
   
-  context.log("\n🔍 Step 4: Comparing with existing zones...");
+  context.log("\n🔍 Step 4: 比对并确认新zones...");
   const confirmedNewZones = [];
   const allNewNotifications = [];
   
   for (const potentialZone of potentialNewZones) {
     if (!previousZones.has(potentialZone.identifier)) {
-      context.log(`✅ Confirmed new zone: ${potentialZone.identifier}`);
+      context.log(`  ✅ 确认新zone: ${potentialZone.identifier}`);
+      context.log(`     使用的检测窗口: ${potentialZone.windowUsed} 分钟`);
       confirmedNewZones.push(potentialZone.identifier);
+      
+      // 添加到内存Set
+      previousZones.add(potentialZone.identifier);
       
       const { message, subject } = generateNotificationMessage(
         potentialZone.symbol,
@@ -1078,57 +1366,94 @@ module.exports = async (context) => {
       
       allNewNotifications.push({ message, subject });
     } else {
-      context.log(`⏭️ Zone already exists: ${potentialZone.identifier}`);
+      context.log(`  ⏭️ Zone已存在: ${potentialZone.identifier}`);
     }
   }
 
   // ============================================================================
-  // 步骤5：批量保存真正的新zones
+  // 步骤5：保存到Storage并清理旧数据
   // ============================================================================
   
-  let savedCount = 0;
   if (confirmedNewZones.length > 0) {
-    context.log(`\n💾 Step 5: Saving ${confirmedNewZones.length} new zones to database...`);
-    savedCount = await saveNewZonesBatch(databases, DB_ID, COLLECTION_ID, confirmedNewZones, context);
+    context.log(`\n💾 Step 5: 保存 ${confirmedNewZones.length} 个新zones到Storage...`);
+    
+    // 清理旧数据
+    previousZones = await cleanupStorageZones(previousZones, context);
+    
+    // 保存到Storage
+    await saveZonesToStorage(storage, previousZones, context);
+    storageWrites++;
+    
+    // 🆕 异步保存到Database（不阻塞主流程）
+    if (RUNTIME_CONFIG.DB_CONFIG.SAVE_FULL_DATA) {
+      context.log("   📝 异步保存新zones到Database (不阻塞)...");
+      saveNewZonesAsync(databases, DB_ID, COLLECTION_ID, confirmedNewZones, allZonesData, context);
+    }
   } else {
-    context.log("\n✅ No new zones to save.");
+    context.log("\n✅ 无新zones需要保存");
   }
 
   // ============================================================================
-  // 步骤6：发送通知
+  // 步骤6：执行每日Database同步（如果在时间窗口内）
+  // ============================================================================
+  
+  if (needDailySync) {
+    const syncedCount = await syncStorageToDatabase(
+      storage,
+      databases,
+      DB_ID,
+      COLLECTION_ID,
+      allZonesData,
+      context
+    );
+    databaseReads++;
+    if (syncedCount > 0) {
+      databaseWrites += syncedCount;
+    }
+  }
+
+  // ============================================================================
+  // 步骤7：发送通知
   // ============================================================================
   
   if (allNewNotifications.length > 0) {
-    context.log(`\n✉️ Step 6: Sending ${allNewNotifications.length} notification(s)...`);
+    context.log(`\n✉️ Step 7: 发送 ${allNewNotifications.length} 条通知...`);
     for (const n of allNewNotifications) {
       await sendTelegramNotification(CONFIG, n.message, context);
       await sendEmailNotification(CONFIG, n.subject, n.message, context);
       await new Promise(resolve => setTimeout(resolve, 1000));
     }
   } else {
-    context.log("\n✅ No notifications to send.");
+    context.log("\n✅ 无需发送通知");
   }
 
   // ============================================================================
-  // 步骤7：返回执行统计
+  // 步骤8：返回执行统计
   // ============================================================================
   
   const executionTime = ((Date.now() - executionStart) / 1000).toFixed(2);
   
-  context.log("\n🎉 Function execution finished successfully.");
-  context.log(`⏱️ Total execution time: ${executionTime}s`);
-  context.log(`📊 Database operations: 1 read + ${savedCount} writes`);
+  context.log("\n" + "=".repeat(80));
+  context.log("🎉 Function执行完成!");
+  context.log(`⏱️ 总执行时间: ${executionTime}秒`);
+  context.log(`💾 Storage操作: ${storageReads}次读取 + ${storageWrites}次写入`);
+  context.log(`📊 Database操作: ${databaseReads}次读取 + ${databaseWrites}次写入`);
+  context.log(`🆕 新zones数量: ${allNewNotifications.length}`);
+  context.log(`🔄 每日同步: ${needDailySync ? '已执行' : '未到时间'}`);
+  context.log("=".repeat(80) + "\n");
   
   return context.res.json({
     success: true,
     new_zones_found: allNewNotifications.length,
     potential_zones_detected: potentialNewZones.length,
     confirmed_new_zones: confirmedNewZones.length,
-    database_reads: 1,
-    database_writes: savedCount,
-    records_loaded: previousZones.size,
+    storage_reads: storageReads,
+    storage_writes: storageWrites,
+    database_reads: databaseReads,
+    database_writes: databaseWrites,
+    daily_sync_executed: needDailySync,
     execution_time_seconds: executionTime,
-    optimization_triggered: false,
+    optimization_level: "Storage缓存 + Database备份",
     timestamp: new Date().toISOString()
   });
 };
