@@ -18,7 +18,7 @@ const RUNTIME_CONFIG = {
   },
   
   STORAGE_CONFIG: {
-    BUCKET_ID: "zone_cache",
+    BUCKET_ID: "69212fae00370f2eaf74",
     FILE_ID: "seen_zones.json",
     CLEANUP_DAYS: 30,
     AUTO_CREATE_BUCKET: false,
