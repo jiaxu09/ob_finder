@@ -252,7 +252,7 @@ async function sendEmailNotification(config, subject, body, context) {
   let transporter = nodemailer.createTransport(config.EMAIL_CONFIG);
   try {
     let info = await transporter.sendMail({
-      from: `Crypto Alerter <${config.EMAIL_CONFIG.auth.user}>`,
+      from: `Alerter <${config.EMAIL_CONFIG.auth.user}>`,
       to: config.EMAIL_RECIPIENT,
       subject: subject,
       text: body,
