@@ -15,13 +15,16 @@ const nodemailer = require("nodemailer");
 const RUNTIME_CONFIG = {
   EXECUTION_INTERVAL_MINUTES: 5,
 
+  // 调整时间窗口以匹配"收盘后"的检测逻辑
+  // 窗口时间 = K线周期 + 缓冲时间
+  // 确保我们能捕获到刚刚收盘的那根K线形成的OB
   TIMEFRAME_WINDOWS: {
-    "1m": 15,
-    "5m": 20,
-    "15m": 30,
-    "1h": 90,
-    "4h": 300,
-    "1d": 1500,
+    "1m": 5,
+    "5m": 10,
+    "15m": 20,
+    "1h": 70,   // 1小时K线收盘后的70分钟内都视为"新"
+    "4h": 250,  // 4小时K线收盘后的250分钟内
+    "1d": 1500, // 1天K线收盘后的25小时内
   },
 
   STORAGE_CONFIG: {
@@ -363,75 +366,41 @@ function formatOBDetails(ob, index, symbol, timeframe) {
 ║
 ║ ⏰ 时间信息
 ║   ├─ 形成时间: ${formatTime(ob.startTime)}
-║   ├─ 确认时间: ${formatTime(ob.confirmationTime)}
+║   ├─ 确认时间: ${formatTime(ob.confirmationTime)} (K线收盘确认)
 ║   ├─ 交易时段: ${sessionInfo.emoji} ${sessionInfo.session}
-║   ├─ 时段描述: ${sessionInfo.description}
 ║   └─ 时段可靠性: ${sessionInfo.reliable ? "✅ 高流动性" : "⚠️ 低流动性"}
 ║
-║ 📊 成交量分析 ${parseFloat(ob.volumeRatio) >= 1.2 ? "✅ 已通过" : "❌ 未通过"}
+║ 📊 成交量分析 (严格过滤)
 ║   ├─ 突破成交量: ${ob.breakoutVolume.toFixed(0)}
 ║   ├─ SMA20基准: ${ob.volumeSMA20.toFixed(0)}
 ║   ├─ 成交量比率: ${ob.volumeRatio}x ${
     parseFloat(ob.volumeRatio) >= 1.2 ? "✅ (>1.2)" : "❌ (<1.2)"
   }
-║   ├─ OB总成交量: ${ob.obVolume.toFixed(0)}
-║   ├─ 高量部分: ${ob.obHighVolume.toFixed(0)}
-║   └─ 低量部分: ${ob.obLowVolume.toFixed(0)}
+║   └─ 状态: ${parseFloat(ob.volumeRatio) >= 1.2 ? "✅ 通过" : "❌ 未通过"}
 ║
-║ ⚖️ 平衡度评估 ${
-    ob.balancePercent >= 20 && ob.balancePercent <= 80
-      ? "✅ 已通过"
-      : "❌ 未通过"
-  }
+║ ⚖️ 平衡度评估 (严格过滤)
 ║   ├─ 平衡度: ${ob.balancePercent}% ${ob.balanceQuality}
 ║   ├─ 有效范围: 20%-80% ${
     ob.balancePercent >= 20 && ob.balancePercent <= 80 ? "✅" : "❌"
   }
-║   └─ 平衡评价: ${
-    ob.balancePercent >= 60 && ob.balancePercent <= 80
-      ? "理想的买卖平衡"
-      : ob.balancePercent >= 40 && ob.balancePercent < 60
-      ? "较好的买卖平衡"
-      : ob.balancePercent >= 20 && ob.balancePercent < 40
-      ? "一般的买卖平衡"
-      : "买卖失衡"
+║   └─ 状态: ${
+    ob.balancePercent >= 20 && ob.balancePercent <= 80 ? "✅ 通过" : "❌ 未通过"
   }
 ║
 ║ 🕯️ 突破K线形态分析
 ║   ├─ 形态类型: ${bp.candleEmoji} ${bp.candleType}
-║   ├─ K线方向: ${bp.direction} ${bp.directionMatchEmoji}
-║   ├─ 方向匹配: ${
-    bp.isDirectionMatched ? "✅ 与OB类型一致" : "⚠️ 与OB类型不一致"
-  }
 ║   ├─ 突破强度: ${bp.breakoutEmoji} ${bp.breakoutStrength} (得分: ${
     bp.strengthScore
   }/100)
-║   ├─ 价格变动: ${bp.priceChangePercent}%
-║   ├─ 实体占比: ${bp.bodyPercent}% (实体大小: ${bp.body})
-║   ├─ 上影线: ${bp.upperWickPercent}% (长度: ${bp.upperWick})
-║   ├─ 下影线: ${bp.lowerWickPercent}% (长度: ${bp.lowerWick})
-║   ├─ 总波动: ${bp.totalRange}
-║   ├─ 形态描述: ${bp.description}
+║   ├─ 实体占比: ${bp.bodyPercent}%
 ║   └─ 交易建议: ${bp.recommendation}
-║
-║ 🎯 状态信息
-║   ├─ Breaker: ${ob.breaker ? "🟡 已触及" : "🟢 未触及"}
-║   ├─ 有效性: ${ob.isValid ? "✅ 有效" : "❌ 已失效"}
-${
-  ob.breaker
-    ? `║   └─ 触及时间: ${formatTime(ob.breakTime)}`
-    : "║   └─ 区域完整性: 保持完好"
-}
 ║
 ║ 💡 综合评分
 ║   ├─ K线强度: ${bp.strengthScore}/100 ${bp.breakoutEmoji}
-║   ├─ 成交量: ${parseFloat(ob.volumeRatio) >= 1.2 ? "✅" : "❌"} (${
-    ob.volumeRatio
-  }x)
+║   ├─ 成交量: ${parseFloat(ob.volumeRatio) >= 1.2 ? "✅" : "❌"}
 ║   ├─ 平衡度: ${
     ob.balancePercent >= 20 && ob.balancePercent <= 80 ? "✅" : "❌"
-  } (${ob.balancePercent}%)
-║   ├─ 时段: ${sessionInfo.reliable ? "✅" : "⚠️"} (${sessionInfo.session})
+  }
 ║   └─ 整体评价: ${
     bp.strengthScore >= 80 &&
     parseFloat(ob.volumeRatio) >= 1.2 &&
@@ -453,8 +422,8 @@ function logAllOBs(allZonesData, context) {
   context.log(
     "█" +
       " ".repeat(20) +
-      "📊 所有检测到的 ORDER BLOCKS 详细信息" +
-      " ".repeat(20) +
+      "📊 所有检测到的 ORDER BLOCKS (仅基于已收盘K线)" +
+      " ".repeat(15) +
       "█"
   );
   context.log("█" + " ".repeat(78) + "█");
@@ -593,7 +562,7 @@ function evaluateBalanceQuality(balance) {
 }
 
 // ============================================================================
-// --- Order Block 识别（代码太长，保持不变）---
+// --- Order Block 识别（核心逻辑）---
 // ============================================================================
 
 function findOrderBlocksPineScriptLogic(
@@ -659,6 +628,9 @@ function findOrderBlocksPineScriptLogic(
 
     const currentCandle = klines[barIndex];
 
+    // ------------------------------------------------------------------------
+    // 🟢 看涨 OB 检测
+    // ------------------------------------------------------------------------
     if (
       lastSwingHigh &&
       !lastSwingHigh.crossed &&
@@ -667,14 +639,16 @@ function findOrderBlocksPineScriptLogic(
       lastSwingHigh.crossed = true;
       stats.totalBullishSignals++;
 
+      // 1. 成交量过滤 (Volume Filter)
       const volumeSMA20 = calculateVolumeSMA(klines, barIndex, volumeSMAPeriod);
       const volumeThreshold = volumeSMA20 * volumeMultiplier;
 
       if (currentCandle.volume <= volumeThreshold) {
         stats.bullishRejectedByVolume++;
-        continue;
+        continue; // 过滤：成交量不足
       }
 
+      // 2. 寻找 OB 区域
       let boxBtm =
         barIndex >= 1 ? klines[barIndex - 1].high : currentCandle.high;
       let boxTop = barIndex >= 1 ? klines[barIndex - 1].low : currentCandle.low;
@@ -695,6 +669,7 @@ function findOrderBlocksPineScriptLogic(
         }
       }
 
+      // 3. 平衡度过滤 (Balance Filter)
       const vol0 = currentCandle.volume;
       const vol1 = barIndex >= 1 ? klines[barIndex - 1].volume : 0;
       const vol2 = barIndex >= 2 ? klines[barIndex - 2].volume : 0;
@@ -711,9 +686,10 @@ function findOrderBlocksPineScriptLogic(
         balancePercent > maxBalancePercent
       ) {
         stats.bullishRejectedByBalance++;
-        continue;
+        continue; // 过滤：平衡度不佳
       }
 
+      // 4. ATR 过滤
       const obSize = Math.abs(boxTop - boxBtm);
       if (obSize <= atr * maxATRMult) {
         const breakoutPattern = analyzeBreakoutCandlePattern(
@@ -722,7 +698,7 @@ function findOrderBlocksPineScriptLogic(
         );
         bullishOBs.unshift({
           startTime: boxLoc,
-          confirmationTime: currentCandle.timestamp,
+          confirmationTime: currentCandle.timestamp, // 这是K线收盘确认的时间
           top: boxTop,
           bottom: boxBtm,
           obVolume,
@@ -742,6 +718,9 @@ function findOrderBlocksPineScriptLogic(
       }
     }
 
+    // ------------------------------------------------------------------------
+    // 🔴 看跌 OB 检测
+    // ------------------------------------------------------------------------
     if (
       lastSwingLow &&
       !lastSwingLow.crossed &&
@@ -750,14 +729,16 @@ function findOrderBlocksPineScriptLogic(
       lastSwingLow.crossed = true;
       stats.totalBearishSignals++;
 
+      // 1. 成交量过滤
       const volumeSMA20 = calculateVolumeSMA(klines, barIndex, volumeSMAPeriod);
       const volumeThreshold = volumeSMA20 * volumeMultiplier;
 
       if (currentCandle.volume <= volumeThreshold) {
         stats.bearishRejectedByVolume++;
-        continue;
+        continue; // 过滤
       }
 
+      // 2. 寻找 OB 区域
       let boxBtm = barIndex >= 1 ? klines[barIndex - 1].low : currentCandle.low;
       let boxTop =
         barIndex >= 1 ? klines[barIndex - 1].high : currentCandle.high;
@@ -778,6 +759,7 @@ function findOrderBlocksPineScriptLogic(
         }
       }
 
+      // 3. 平衡度过滤
       const vol0 = currentCandle.volume;
       const vol1 = barIndex >= 1 ? klines[barIndex - 1].volume : 0;
       const vol2 = barIndex >= 2 ? klines[barIndex - 2].volume : 0;
@@ -794,9 +776,10 @@ function findOrderBlocksPineScriptLogic(
         balancePercent > maxBalancePercent
       ) {
         stats.bearishRejectedByBalance++;
-        continue;
+        continue; // 过滤
       }
 
+      // 4. ATR 过滤
       const obSize = Math.abs(boxTop - boxBtm);
       if (obSize <= atr * maxATRMult) {
         const breakoutPattern = analyzeBreakoutCandlePattern(
@@ -805,7 +788,7 @@ function findOrderBlocksPineScriptLogic(
         );
         bearishOBs.unshift({
           startTime: boxLoc,
-          confirmationTime: currentCandle.timestamp,
+          confirmationTime: currentCandle.timestamp, // 这是K线收盘确认的时间
           top: boxTop,
           bottom: boxBtm,
           obVolume,
@@ -825,6 +808,7 @@ function findOrderBlocksPineScriptLogic(
       }
     }
 
+    // 检查 Breaker 状态
     for (let ob of bullishOBs) {
       if (!ob.breaker) {
         const testValue =
@@ -871,13 +855,17 @@ function detectPotentialNewZones(allZonesData, context) {
   const now = new Date();
   const potentialNewZones = [];
 
-  context.log("\n🔍 检测潜在新zones (使用智能时间窗口)...");
+  context.log("\n🔍 检测潜在新zones (基于已收盘K线)...");
 
   for (const { symbol, timeframe, zones } of allZonesData) {
+    // 使用配置的时间窗口，确保我们能捕获到最近收盘的K线形成的OB
     const windowMinutes = RUNTIME_CONFIG.TIMEFRAME_WINDOWS[timeframe] || 90;
     const timeThreshold = new Date(now.getTime() - windowMinutes * 60 * 1000);
 
     const allZones = [...zones.bullishOBs, ...zones.bearishOBs];
+    
+    // 这里的 confirmationTime 是K线的 Open Time，但因为我们只处理了 Closed Klines，
+    // 所以这个时间代表的是"刚刚收盘的那根K线的开始时间"
     const recentZones = allZones.filter(
       (zone) => zone.confirmationTime >= timeThreshold
     );
@@ -885,13 +873,17 @@ function detectPotentialNewZones(allZonesData, context) {
     if (recentZones.length > 0) {
       context.log(
         `  🆕 ${symbol} ${timeframe}: 发现 ${recentZones.length} 个潜在新zones\n` +
-          `      检测窗口: ${windowMinutes} 分钟 (${(
-            windowMinutes / 60
-          ).toFixed(1)} 小时)\n` +
+          `      检测窗口: ${windowMinutes} 分钟\n` +
           `      时间阈值: ${timeThreshold.toISOString()}`
       );
 
       for (const zone of recentZones) {
+        // 再次确认过滤条件（虽然findOrderBlocksPineScriptLogic已经过滤过了，这里做二次确认日志）
+        if (parseFloat(zone.volumeRatio) < 1.2) {
+          context.log(`      ⚠️ 跳过: 成交量比率不足 (${zone.volumeRatio})`);
+          continue;
+        }
+
         const zoneIdentifier = `${symbol}-${timeframe}-${zone.startTime.getTime()}-${
           zone.type
         }`;
@@ -1159,7 +1151,7 @@ function generateNotificationMessage(symbol, timeframe, zone, CONFIG) {
     : "";
 
   const message =
-    `*🔔 新 Order Block 区域警报*\n\n` +
+    `*🔔 新 Order Block 区域警报 (已收盘确认)*\n\n` +
     `*交易对:* ${symbol}\n*时间周期:* ${timeframe}\n` +
     `*类型:* ${zone.type === "Support" ? "🟢 看涨支撑区" : "🔴 看跌阻力区"}\n` +
     `*状态:* ${status}\n` +
@@ -1183,7 +1175,7 @@ function generateNotificationMessage(symbol, timeframe, zone, CONFIG) {
 // ============================================================================
 module.exports = async (context) => {
   const executionStart = Date.now();
-  context.log("🚀 Function execution started (v4.4 - 移除Bucket检查)...");
+  context.log("🚀 Function execution started (v4.5 - 严格收盘确认模式)...");
   context.log(`⏰ 执行时间: ${new Date().toISOString()}\n`);
 
   const CONFIG = {
@@ -1224,7 +1216,7 @@ module.exports = async (context) => {
   // 步骤1：分析OB
   // ============================================================================
 
-  context.log("📊 Step 1: 分析所有交易对和时间周期...\n");
+  context.log("📊 Step 1: 分析所有交易对和时间周期 (仅使用已收盘K线)...\n");
   const allZonesData = [];
 
   for (const symbol of CONFIG.SYMBOLS) {
@@ -1236,8 +1228,13 @@ module.exports = async (context) => {
         continue;
       }
 
+      // 🔑 关键修改：移除最后一根未收盘的K线
+      // Binance API 返回的最后一根K线是当前正在进行的，数据会变动。
+      // 移除它确保我们只基于"已确认"的历史数据进行计算，防止重绘。
+      const closedKlines = klines.slice(0, -1);
+
       const result = findOrderBlocksPineScriptLogic(
-        klines,
+        closedKlines, // 传入处理后的K线
         CONFIG.SWING_LENGTH,
         CONFIG.OB_END_METHOD,
         CONFIG.MAX_ATR_MULT,
